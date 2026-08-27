@@ -18,8 +18,14 @@ import (
 const (
 	DefaultIngestAddr    = "127.0.0.1:1935"
 	DefaultSourceTimeout = 5 * time.Second
-	DefaultBufferSize    = 256 * 1024 * 1024
 	DefaultAPIAddr       = "127.0.0.1:8080"
+
+	// DefaultBufferMaxSize — потолок автоподбора размера буфера (buffer.max_size),
+	// если в конфиге не указан свой.
+	DefaultBufferMaxSize = 512 * 1024 * 1024
+
+	// BufferMinSize — жёсткая нижняя граница автоподбора, не настраивается.
+	BufferMinSize = 32 * 1024 * 1024
 )
 
 // Config — конфиг как он есть в JSON-файле.
@@ -36,7 +42,8 @@ type IngestConfig struct {
 }
 
 type BufferConfig struct {
-	Size string `json:"size"`
+	Size    string `json:"size"`     // явный размер; если пусто — автоподбор по задержкам/битрейту
+	MaxSize string `json:"max_size"` // потолок автоподбора, по умолчанию 512MB; игнорируется, если Size задан
 }
 
 type APIConfig struct {
@@ -57,9 +64,23 @@ type OutputConfig struct {
 type Resolved struct {
 	IngestAddr    string
 	SourceTimeout time.Duration
+
+	// BufferAuto — true, если buffer.size не задан явно: размер буфера
+	// подбирается автоматически как (MaxOutputDelay + 60s) * измеренный
+	// битрейт, ограниченный [BufferMinSize, BufferMaxSize]. BufferSize в
+	// этом случае — только начальное значение (BufferMinSize) до первого
+	// измерения.
+	BufferAuto    bool
 	BufferSize    int64
-	APIAddr       string
-	Outputs       []ResolvedOutput
+	BufferMaxSize int64
+
+	// MaxOutputDelay — наибольшая задержка среди ВСЕХ выходов конфига,
+	// включая выключенные (их могут включить через API позже — буфер должен
+	// быть готов держать нужную глубину уже сейчас).
+	MaxOutputDelay time.Duration
+
+	APIAddr string
+	Outputs []ResolvedOutput
 }
 
 // ResolvedOutput — один выход. URL уже включает ключ потока (см.
@@ -140,15 +161,28 @@ func resolve(cfg *Config) (*Resolved, error) {
 		res.SourceTimeout = d
 	}
 
-	// buffer.size
-	if cfg.Buffer.Size == "" {
-		res.BufferSize = DefaultBufferSize
-	} else if n, err := ParseSize(cfg.Buffer.Size); err != nil {
-		addf("buffer.size: %s", err)
-	} else if n <= 0 {
-		addf("buffer.size: must be positive, got %q", cfg.Buffer.Size)
+	// buffer.size / buffer.max_size
+	if cfg.Buffer.Size != "" {
+		if n, err := ParseSize(cfg.Buffer.Size); err != nil {
+			addf("buffer.size: %s", err)
+		} else if n <= 0 {
+			addf("buffer.size: must be positive, got %q", cfg.Buffer.Size)
+		} else {
+			res.BufferSize = n
+		}
 	} else {
-		res.BufferSize = n
+		res.BufferAuto = true
+		res.BufferSize = BufferMinSize // стартовое значение до первого измерения битрейта
+
+		if cfg.Buffer.MaxSize == "" {
+			res.BufferMaxSize = DefaultBufferMaxSize
+		} else if n, err := ParseSize(cfg.Buffer.MaxSize); err != nil {
+			addf("buffer.max_size: %s", err)
+		} else if n < BufferMinSize {
+			addf("buffer.max_size: must be at least %d bytes (32MB), got %q", BufferMinSize, cfg.Buffer.MaxSize)
+		} else {
+			res.BufferMaxSize = n
+		}
 	}
 
 	// api.addr
@@ -204,6 +238,12 @@ func resolve(cfg *Config) (*Resolved, error) {
 				Delay:   delay,
 				Enabled: enabled,
 			})
+		}
+
+		// В размер буфера должна укладываться задержка любого выхода, даже
+		// выключенного сейчас — его могут включить позже через API.
+		if delay > res.MaxOutputDelay {
+			res.MaxOutputDelay = delay
 		}
 	}
 

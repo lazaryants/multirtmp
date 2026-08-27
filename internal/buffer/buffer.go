@@ -83,6 +83,23 @@ func (b *Buffer) Push(tag Tag) {
 	b.mu.Unlock()
 }
 
+// SetCapacity меняет ёмкость буфера в байтах — используется автоподбором
+// размера (see cmd/multirtmp/bufferauto.go). При уменьшении лишние старые
+// теги не обрезаются немедленно, а естественно вытесняются при следующих
+// Push — не тратим время под локом на внеочередную чистку.
+func (b *Buffer) SetCapacity(bytes int64) {
+	b.mu.Lock()
+	b.capBytes = bytes
+	b.mu.Unlock()
+}
+
+// Capacity возвращает текущую ёмкость буфера в байтах.
+func (b *Buffer) Capacity() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.capBytes
+}
+
 // SetMetadata обновляет липкий тег onMetaData.
 func (b *Buffer) SetMetadata(tag Tag) {
 	b.mu.Lock()

@@ -24,8 +24,8 @@ func main() {
 	debug := flag.Bool("debug", true, "print debug logs (including periodic stats every 2s)")
 
 	addr := flag.String("addr", config.DefaultIngestAddr, "override ingest.addr from config")
-	bufSize := sizeFlag(config.DefaultBufferSize)
-	flag.Var(&bufSize, "buffer", "override buffer.size from config, accepts K/M/G or KB/MB/GB suffixes")
+	bufSize := sizeFlag(config.BufferMinSize)
+	flag.Var(&bufSize, "buffer", "override buffer.size from config (disables autosize), accepts K/M/G or KB/MB/GB suffixes")
 	sourceTimeout := flag.Duration("source-timeout", config.DefaultSourceTimeout, "override ingest.source_timeout from config")
 	apiAddr := flag.String("api-addr", config.DefaultAPIAddr, "override api.addr from config")
 
@@ -68,6 +68,7 @@ func main() {
 		"ingest_addr", cfg.IngestAddr,
 		"api_addr", cfg.APIAddr,
 		"buffer_size", cfg.BufferSize,
+		"buffer_auto", cfg.BufferAuto,
 		"outputs", len(cfg.Outputs),
 	)
 
@@ -78,6 +79,10 @@ func main() {
 	defer stop()
 
 	go buf.LogStats(ctx, logger, bufferStatsInterval)
+
+	if cfg.BufferAuto {
+		go runBufferAutosize(ctx, buf, ingestSrv, logger, cfg.MaxOutputDelay, cfg.BufferMaxSize)
+	}
 
 	registry := output.NewRegistry(ctx)
 	var toStart []string
@@ -161,6 +166,7 @@ func applyFlagOverrides(cfg *config.Resolved, addr *string, bufSize *sizeFlag, s
 			cfg.IngestAddr = *addr
 		case "buffer":
 			cfg.BufferSize = int64(*bufSize)
+			cfg.BufferAuto = false
 		case "source-timeout":
 			cfg.SourceTimeout = *sourceTimeout
 		case "api-addr":
@@ -170,6 +176,7 @@ func applyFlagOverrides(cfg *config.Resolved, addr *string, bufSize *sizeFlag, s
 
 	if len(outs) > 0 {
 		cfg.Outputs = make([]config.ResolvedOutput, 0, len(outs))
+		cfg.MaxOutputDelay = 0
 		for i, o := range outs {
 			cfg.Outputs = append(cfg.Outputs, config.ResolvedOutput{
 				Name:    fmt.Sprintf("out%d", i),
@@ -177,6 +184,9 @@ func applyFlagOverrides(cfg *config.Resolved, addr *string, bufSize *sizeFlag, s
 				Delay:   o.Delay,
 				Enabled: true,
 			})
+			if o.Delay > cfg.MaxOutputDelay {
+				cfg.MaxOutputDelay = o.Delay
+			}
 		}
 	}
 }
