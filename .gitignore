@@ -1,0 +1,6 @@
+@"
+/bin/
+*.exe
+config.local.json
+*.log
+"@ | Out-File -Encoding utf8 .gitignore
