@@ -2,11 +2,14 @@ package output
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"multirtmp/internal/notify"
 )
 
 // State — текущее состояние выхода, как оно отдаётся в GET /status.
@@ -17,6 +20,12 @@ const (
 	StateWaitingForSource State = "waiting_for_source"
 	StateConnecting       State = "connecting"
 	StateStreaming        State = "streaming"
+)
+
+// reconnectRateWindow/reconnectRateThreshold — порог алерта "шторм реконнектов".
+const (
+	reconnectRateWindow    = 60 * time.Second
+	reconnectRateThreshold = 5
 )
 
 // Status — снимок состояния одного выхода.
@@ -51,6 +60,9 @@ type status struct {
 	reconnects      int64
 	lastError       string
 	streamStartedAt time.Time // zero, если state != StateStreaming
+
+	down           bool        // true, если последняя попытка подключения провалилась и мы ещё не восстановились
+	recentFailures []time.Time // метки отказов за последние reconnectRateWindow — для алерта "шторм реконнектов"
 }
 
 func newStatus(name string) *status {
@@ -66,20 +78,70 @@ func (s *status) record(n int, lag time.Duration) {
 	s.windowLagCount.Add(1)
 }
 
-func (s *status) setState(st State) {
+// setState меняет состояние. Переход в StateStreaming после того, как выход
+// был отмечен как "down", шлёт алерт восстановления и снимает флаг — это
+// единственный переход, порождающий уведомление (обычный первый коннект при
+// старте воркера — down изначально false, алерт не шлётся).
+func (s *status) setState(st State, notifier *notify.Notifier) {
 	s.mu.Lock()
 	s.state = st
 	if st == StateStreaming {
 		s.streamStartedAt = time.Now()
-	} else {
-		s.streamStartedAt = time.Time{}
+		wasDown := s.down
+		s.down = false
+		name := s.name
+		s.mu.Unlock()
+
+		if wasDown {
+			notifier.Send("output_up:"+name, fmt.Sprintf("Output %q is back up", name))
+		}
+		return
 	}
+
+	s.streamStartedAt = time.Time{}
 	s.mu.Unlock()
 }
 
-// recordReconnect отмечает, что соединение оборвалось и потребуется новая
-// попытка — увеличивает счётчик и запоминает причину для last_error.
-func (s *status) recordReconnect(err error) {
+// recordFailure отмечает провалившуюся попытку подключения/отправки — не
+// republish источника (для него см. recordReset). Шлёт алерт "выход
+// отвалился" по фронту (не на каждой повторной неудачной попытке подряд) и
+// отдельный алерт, если реконнектов за последнюю минуту больше
+// reconnectRateThreshold.
+func (s *status) recordFailure(err error, notifier *notify.Notifier) {
+	s.mu.Lock()
+	s.reconnects++
+	if err != nil {
+		s.lastError = err.Error()
+	}
+
+	now := time.Now()
+	s.recentFailures = append(s.recentFailures, now)
+	cutoff := now.Add(-reconnectRateWindow)
+	i := 0
+	for i < len(s.recentFailures) && s.recentFailures[i].Before(cutoff) {
+		i++
+	}
+	s.recentFailures = s.recentFailures[i:]
+	rate := len(s.recentFailures)
+
+	wasDown := s.down
+	s.down = true
+	name := s.name
+	s.mu.Unlock()
+
+	if !wasDown {
+		notifier.Send("output_down:"+name, fmt.Sprintf("Output %q is down: %v", name, err))
+	}
+	if rate > reconnectRateThreshold {
+		notifier.Send("output_flapping:"+name,
+			fmt.Sprintf("Output %q reconnected %d times in the last minute", name, rate))
+	}
+}
+
+// recordReset отмечает реконнект, вызванный новым publish источника (см.
+// buffer.ErrReset) — это не отказ назначения, поэтому алерт "выход отвалился"
+// не шлётся, только счётчики/last_error для наблюдаемости.
+func (s *status) recordReset(err error) {
 	s.mu.Lock()
 	s.reconnects++
 	if err != nil {
@@ -118,12 +180,15 @@ func round(x float64, decimals int) float64 {
 // run печатает сводную статистику раз в interval, пока не отменён ctx, и
 // заодно кеширует последние kbps/lag_s для Snapshot. Живёт весь жизненный
 // цикл воркера (запускается один раз в Run), не пересоздаётся при реконнектах.
-func (s *status) run(ctx context.Context, logger *slog.Logger, interval time.Duration) {
+// Заодно проверяет lag_s против delay+30s — алерт, если превышен.
+func (s *status) run(ctx context.Context, logger *slog.Logger, interval time.Duration, notifier *notify.Notifier, delay time.Duration) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("output: panic in stats goroutine", "panic", r)
 		}
 	}()
+
+	lagAlertThreshold := delay + catchUpGrace
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -152,7 +217,13 @@ func (s *status) run(ctx context.Context, logger *slog.Logger, interval time.Dur
 			if haveLag {
 				s.lastLagS = lagS
 			}
+			name := s.name
 			s.mu.Unlock()
+
+			if haveLag && time.Duration(lagS*float64(time.Second)) > lagAlertThreshold {
+				notifier.Send("output_lag:"+name,
+					fmt.Sprintf("Output %q lag is %.1fs (delay %s + 30s grace exceeded)", name, lagS, delay))
+			}
 
 			attrs := []any{"kbps", kbps, "tags_sent", tagsSent}
 			if haveLag {

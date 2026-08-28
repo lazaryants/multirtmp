@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"multirtmp/internal/notify"
 )
 
 const (
@@ -26,6 +29,8 @@ const (
 
 	// BufferMinSize — жёсткая нижняя граница автоподбора, не настраивается.
 	BufferMinSize = 32 * 1024 * 1024
+
+	DefaultLogLevel = slog.LevelInfo
 )
 
 // Config — конфиг как он есть в JSON-файле.
@@ -33,7 +38,18 @@ type Config struct {
 	Ingest  IngestConfig   `json:"ingest"`
 	Buffer  BufferConfig   `json:"buffer"`
 	API     APIConfig      `json:"api"`
+	Log     LogConfig      `json:"log"`
+	Notify  NotifyConfig   `json:"notify"`
 	Outputs []OutputConfig `json:"outputs"`
+}
+
+type LogConfig struct {
+	Level string `json:"level"` // debug/info/warn/error, по умолчанию info
+}
+
+type NotifyConfig struct {
+	TelegramBotToken string `json:"telegram_bot_token"`
+	TelegramChatID   string `json:"telegram_chat_id"`
 }
 
 type IngestConfig struct {
@@ -80,6 +96,10 @@ type Resolved struct {
 	MaxOutputDelay time.Duration
 
 	APIAddr string
+
+	LogLevel slog.Level
+	Notify   notify.Config // нулевое значение = notify выключен
+
 	Outputs []ResolvedOutput
 }
 
@@ -92,25 +112,57 @@ type ResolvedOutput struct {
 	Enabled bool
 }
 
+// ConfigError оборачивает ошибку загрузки/валидации конфига — сигнал
+// вызывающему коду (в частности, обвязке Windows-службы), что перезапуск
+// процесса не поможет: нужен человек, который поправит config.json. Служба
+// должна в этом случае завершиться "чисто" (код 0), а не уйти в бесконечный
+// цикл recovery-рестартов на опечатке в конфиге.
+type ConfigError struct {
+	err error
+}
+
+func (e *ConfigError) Error() string { return e.err.Error() }
+func (e *ConfigError) Unwrap() error { return e.err }
+
 // Load читает файл по path, снимает `//`-комментарии, разбирает JSON,
 // применяет умолчания, валидирует и возвращает уже готовый к использованию
-// Resolved. Если что-то не так — возвращает ошибку со всеми найденными
+// Resolved. Если что-то не так — возвращает *ConfigError со всеми найденными
 // проблемами разом (не только первой), с номером строки для синтаксических
 // ошибок JSON и путём поля (например "outputs[1].name") для смысловых.
 func Load(path string) (*Resolved, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: failed to read %s: %w", path, err)
+		return nil, &ConfigError{err: fmt.Errorf("config: failed to read %s: %w", path, err)}
 	}
 
 	stripped := stripLineComments(raw)
 
 	var cfg Config
 	if err := json.Unmarshal(stripped, &cfg); err != nil {
-		return nil, fmt.Errorf("config: %s", describeJSONError(stripped, err))
+		return nil, &ConfigError{err: fmt.Errorf("config: %s", describeJSONError(stripped, err))}
 	}
 
-	return resolve(&cfg)
+	res, err := resolve(&cfg)
+	if err != nil {
+		return nil, &ConfigError{err: err}
+	}
+
+	return res, nil
+}
+
+func parseLogLevel(s string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("invalid level %q (want debug/info/warn/error)", s)
+	}
 }
 
 // describeJSONError переводит ошибку encoding/json в сообщение с номером
@@ -192,6 +244,25 @@ func resolve(cfg *Config) (*Resolved, error) {
 	}
 	if _, _, err := net.SplitHostPort(res.APIAddr); err != nil {
 		addf("api.addr: invalid address %q: %s", res.APIAddr, err)
+	}
+
+	// log.level
+	if cfg.Log.Level == "" {
+		res.LogLevel = DefaultLogLevel
+	} else if lvl, err := parseLogLevel(cfg.Log.Level); err != nil {
+		addf("log.level: %s", err)
+	} else {
+		res.LogLevel = lvl
+	}
+
+	// notify (telegram) — либо оба поля заданы, либо ни одного
+	hasToken := cfg.Notify.TelegramBotToken != ""
+	hasChatID := cfg.Notify.TelegramChatID != ""
+	switch {
+	case hasToken && hasChatID:
+		res.Notify = notify.Config{BotToken: cfg.Notify.TelegramBotToken, ChatID: cfg.Notify.TelegramChatID}
+	case hasToken != hasChatID:
+		addf("notify: both telegram_bot_token and telegram_chat_id are required, or neither")
 	}
 
 	// outputs

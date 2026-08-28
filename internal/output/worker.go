@@ -1,9 +1,9 @@
 // Package output отправляет теги из общего кольцевого буфера на один RTMP-
-// выход: ждать данные -> подключиться -> липкие теги -> пейсинг по времени
-// прихода тега (Arrival) + настроенная задержка -> побайтовая отправка.
-// Соединение с назначением НЕ открывается, пока в буфере нет данных для
-// немедленной отправки (см. CLAUDE.md, жёсткие правила) — этот порядок
-// действует и при первом подключении, и при каждом реконнекте.
+// выход: ждать тег, готовый к немедленной отправке (Arrival+delay <= now) ->
+// подключиться -> липкие теги -> побайтовая отправка, дальше пейсинг по
+// Arrival+delay для каждого следующего тега. Соединение с назначением НЕ
+// открывается, пока такого тега нет (см. CLAUDE.md, жёсткие правила) — этот
+// порядок действует и при первом подключении, и при каждом реконнекте.
 package output
 
 import (
@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"multirtmp/internal/buffer"
+	"multirtmp/internal/notify"
 )
 
 const (
@@ -55,27 +56,29 @@ func backoffFor(attempt int) time.Duration {
 
 // Worker — воркер одного выхода.
 type Worker struct {
-	name   string
-	url    string
-	delay  time.Duration
-	buf    *buffer.Buffer
-	log    *slog.Logger
-	status *status
+	name     string
+	url      string
+	delay    time.Duration
+	buf      *buffer.Buffer
+	log      *slog.Logger
+	status   *status
+	notifier *notify.Notifier
 }
 
 // NewWorker создаёт воркер выхода name на url (уже с ключом потока в пути)
 // с заданной задержкой пейсинга. В логи попадает только name и host — ключ
-// маскируется (см. MaskURL).
-func NewWorker(name, url string, delay time.Duration, buf *buffer.Buffer, logger *slog.Logger) *Worker {
+// маскируется (см. MaskURL). notifier может быть nil/выключен.
+func NewWorker(name, url string, delay time.Duration, buf *buffer.Buffer, logger *slog.Logger, notifier *notify.Notifier) *Worker {
 	host, keyHint := MaskURL(url)
 
 	return &Worker{
-		name:   name,
-		url:    url,
-		delay:  delay,
-		buf:    buf,
-		status: newStatus(name),
-		log:    logger.With("name", name, "host", host, "key", keyHint, "delay", delay),
+		name:     name,
+		url:      url,
+		delay:    delay,
+		buf:      buf,
+		status:   newStatus(name),
+		notifier: notifier,
+		log:      logger.With("name", name, "host", host, "key", keyHint, "delay", delay),
 	}
 }
 
@@ -98,7 +101,7 @@ func (w *Worker) Run(ctx context.Context) {
 
 	statsCtx, cancelStats := context.WithCancel(ctx)
 	defer cancelStats()
-	go w.status.run(statsCtx, w.log, statsInterval)
+	go w.status.run(statsCtx, w.log, statsInterval, w.notifier, w.delay)
 
 	attempt := 0
 	var wait time.Duration
@@ -131,13 +134,13 @@ func (w *Worker) Run(ctx context.Context) {
 			// ожидания, backoff не трогаем — он про здоровье destination'а,
 			// а не источника.
 			w.log.Warn("output: source republished, reconnecting", "error", err)
-			w.status.recordReconnect(err)
+			w.status.recordReset(err)
 			cur = w.buf.NewCursor(w.delay)
 			wait = 0
 			continue
 		}
 
-		w.status.recordReconnect(err)
+		w.status.recordFailure(err, w.notifier)
 
 		if uptime >= stableUptime {
 			attempt = 0
@@ -157,7 +160,7 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) runConnection(ctx context.Context, cur *buffer.Cursor, attempt int) (time.Duration, error) {
 	w.reposition(cur)
 
-	w.status.setState(StateWaitingForSource)
+	w.status.setState(StateWaitingForSource, w.notifier)
 	w.log.Info("output: waiting for source", "state", StateWaitingForSource, "attempt", attempt)
 
 	first, err := cur.Next(ctx)
@@ -165,7 +168,16 @@ func (w *Worker) runConnection(ctx context.Context, cur *buffer.Cursor, attempt 
 		return 0, err
 	}
 
-	w.status.setState(StateConnecting)
+	// Ждать нужно не "тег есть в буфере", а "тег готов к немедленной отправке
+	// с учётом задержки" — иначе соединение открывается и потом простаивает
+	// до Arrival+delay, а сервер назначения рвёт простаивающий publish по
+	// своему read timeout (та же причина, что и раньше, просто дальше по
+	// цепочке: сон должен быть ДО connect, а не после).
+	if err := waitUntilDue(ctx, first, w.delay); err != nil {
+		return 0, err
+	}
+
+	w.status.setState(StateConnecting, w.notifier)
 	w.log.Info("output: connecting", "state", StateConnecting, "attempt", attempt)
 
 	dialCtx, cancel := context.WithTimeout(ctx, connectTimeout)
@@ -182,7 +194,7 @@ func (w *Worker) runConnection(ctx context.Context, cur *buffer.Cursor, attempt 
 		return 0, err
 	}
 
-	w.status.setState(StateStreaming)
+	w.status.setState(StateStreaming, w.notifier)
 	w.log.Info("output: streaming", "state", StateStreaming, "attempt", attempt)
 	streamStartedAt := time.Now()
 
@@ -190,14 +202,8 @@ func (w *Worker) runConnection(ctx context.Context, cur *buffer.Cursor, attempt 
 	var baseTS uint32
 
 	send := func(tag buffer.Tag) error {
-		if sleepFor := time.Until(tag.Arrival.Add(w.delay)); sleepFor > 0 {
-			t := time.NewTimer(sleepFor)
-			defer t.Stop()
-			select {
-			case <-t.C:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
+		if err := waitUntilDue(ctx, tag, w.delay); err != nil {
+			return err
 		}
 
 		if !haveBase {
@@ -233,6 +239,26 @@ func (w *Worker) runConnection(ctx context.Context, cur *buffer.Cursor, attempt 
 			}
 			return time.Since(streamStartedAt), err
 		}
+	}
+}
+
+// waitUntilDue блокируется до tag.Arrival+delay (пейсинг строго по времени
+// прихода, не по внутренним timestamp'ам). Если тег уже готов к отправке —
+// возвращается немедленно, без отдельной ветки для delay=0.
+func waitUntilDue(ctx context.Context, tag buffer.Tag, delay time.Duration) error {
+	sleepFor := time.Until(tag.Arrival.Add(delay))
+	if sleepFor <= 0 {
+		return nil
+	}
+
+	t := time.NewTimer(sleepFor)
+	defer t.Stop()
+
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

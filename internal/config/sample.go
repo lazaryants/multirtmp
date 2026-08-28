@@ -9,35 +9,50 @@ import (
 // наш загрузчик (stripLineComments), но это валидный вход только для него —
 // сторонние JSON-парсеры такие комментарии не проглотят.
 const sampleConfig = `{
-  // Приём RTMP от vMix. addr — куда слушать; source_timeout — сколько без
-  // единого тега считается потерей источника (лог уровня Error).
+  // RTMP ingest from vMix. addr — where to listen; source_timeout — how long
+  // without a single tag counts as a lost source (logged at Error level).
   "ingest": {
     "addr": "127.0.0.1:1935",
     "source_timeout": "5s"
   },
 
-  // Общий кольцевой буфер тегов. Если "size" не указан (как здесь) — размер
-  // подбирается автоматически: (максимальная delay среди выходов + 60s) *
-  // измеренный битрейт источника, в границах [32MB, max_size]. Пересчитывается
-  // раз в 2с по факту публикации; лог "buffer: resized" — при каждом
-  // изменении. Укажи "size" явно (например "256MB"), чтобы отключить
-  // автоподбор и зафиксировать размер раз и навсегда.
+  // Shared ring buffer of tags. If "size" is omitted (as here), it is
+  // auto-sized: (max delay among outputs + 60s) * measured source bitrate,
+  // clamped to [32MB, max_size]. Recalculated every 2s while publishing; a
+  // "buffer: resized" log line appears whenever it actually changes. Set
+  // "size" explicitly (e.g. "256MB") to disable autosizing and pin it for good.
   "buffer": {
     "max_size": "512MB"
   },
 
-  // HTTP API статуса/управления. Только 127.0.0.1, без аутентификации —
-  // наружу не открывать.
+  // Status/control HTTP API. 127.0.0.1 only, no authentication — never
+  // expose this outside the local machine.
   "api": {
     "addr": "127.0.0.1:8080"
   },
 
-  // Выходы. url — без ключа потока (app-часть, например
-  // "rtmp://a.rtmp.youtube.com/live2"); key — ключ потока отдельным полем,
-  // чтобы не мелькал в логах целиком. delay — задержка этого выхода
-  // относительно источника, меняется только рестартом процесса. enabled —
-  // стартовать ли автоматически при запуске (можно включить позже через
-  // POST /outputs/{name}/start).
+  // Log level for the file (next to the exe, rotated 10MB x5) and stdout
+  // (when not running as a service). "debug" turns on the every-2s stats
+  // lines — noticeable on disk over a day, keep "info" outside of debugging.
+  "log": {
+    "level": "info"
+  },
+
+  // Telegram alerts: source lost/recovered, output down/up, more than 5
+  // reconnects per minute on one output, lag_s exceeding delay+30s. At most
+  // one message per event per 60s. Leave both fields empty to disable
+  // alerts entirely — that's not an error, just off.
+  "notify": {
+    "telegram_bot_token": "",
+    "telegram_chat_id": ""
+  },
+
+  // Outputs. url — without the stream key (the app part only, e.g.
+  // "rtmp://a.rtmp.youtube.com/live2"); key — the stream key as its own
+  // field, so it never appears in full in the logs. delay — this output's
+  // delay relative to the source, changes only by restarting the process.
+  // enabled — whether to start it automatically at launch (can also be
+  // turned on later via POST /outputs/{name}/start).
   "outputs": [
     {
       "name": "corp",

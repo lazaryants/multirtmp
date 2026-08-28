@@ -14,6 +14,7 @@ import (
 	"github.com/yutopp/go-rtmp"
 
 	"multirtmp/internal/buffer"
+	"multirtmp/internal/notify"
 )
 
 // Server — RTMP-сервер приёма. Поддерживает ровно один активный источник:
@@ -23,6 +24,7 @@ type Server struct {
 	logger        *slog.Logger
 	buf           *buffer.Buffer
 	sourceTimeout time.Duration
+	notifier      *notify.Notifier
 
 	rtmpSrv *rtmp.Server
 
@@ -33,12 +35,14 @@ type Server struct {
 // NewServer создаёт RTMP-сервер, слушающий addr (например, "127.0.0.1:1935").
 // Принятые теги пишутся в buf. sourceTimeout — порог watchdog'а источника:
 // сколько без единого тега считается потерей источника (лог уровня Error).
-func NewServer(addr string, logger *slog.Logger, buf *buffer.Buffer, sourceTimeout time.Duration) *Server {
+// notifier может быть nil/выключен — тогда алерты просто не отправляются.
+func NewServer(addr string, logger *slog.Logger, buf *buffer.Buffer, sourceTimeout time.Duration, notifier *notify.Notifier) *Server {
 	return &Server{
 		addr:          addr,
 		logger:        logger,
 		buf:           buf,
 		sourceTimeout: sourceTimeout,
+		notifier:      notifier,
 	}
 }
 
@@ -52,7 +56,7 @@ func (s *Server) ListenAndServe() error {
 
 	s.rtmpSrv = rtmp.NewServer(&rtmp.ServerConfig{
 		OnConnect: func(conn net.Conn) (io.ReadWriteCloser, *rtmp.ConnConfig) {
-			h := newHandler(s, conn.RemoteAddr().String(), s.logger, s.buf, s.sourceTimeout)
+			h := newHandler(s, conn.RemoteAddr().String(), s.logger, s.buf, s.sourceTimeout, s.notifier)
 
 			return conn, &rtmp.ConnConfig{
 				Handler: h,

@@ -4,13 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"multirtmp/internal/buildinfo"
 	"multirtmp/internal/output"
 )
 
 type statusResponse struct {
+	Build   buildJSON        `json:"build"`
 	Source  sourceStatusJSON `json:"source"`
 	Buffer  bufferStatusJSON `json:"buffer"`
 	Outputs []output.Status  `json:"outputs"`
+}
+
+type buildJSON struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
 }
 
 type sourceStatusJSON struct {
@@ -55,6 +62,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	bufStats := s.buf.Stats()
 
 	resp := statusResponse{
+		Build:  buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
 		Source: sj,
 		Buffer: bufferStatusJSON{
 			Bytes:     bufStats.Bytes,

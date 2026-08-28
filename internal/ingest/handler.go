@@ -11,6 +11,7 @@ import (
 	rtmpmsg "github.com/yutopp/go-rtmp/message"
 
 	"multirtmp/internal/buffer"
+	"multirtmp/internal/notify"
 )
 
 const statsInterval = 2 * time.Second
@@ -28,6 +29,7 @@ type handler struct {
 	logger        *slog.Logger
 	buf           *buffer.Buffer
 	sourceTimeout time.Duration
+	notifier      *notify.Notifier
 
 	conn *rtmp.Conn
 
@@ -41,13 +43,14 @@ type handler struct {
 	cancelPublish context.CancelFunc
 }
 
-func newHandler(server *Server, remoteAddr string, logger *slog.Logger, buf *buffer.Buffer, sourceTimeout time.Duration) *handler {
+func newHandler(server *Server, remoteAddr string, logger *slog.Logger, buf *buffer.Buffer, sourceTimeout time.Duration, notifier *notify.Notifier) *handler {
 	return &handler{
 		server:        server,
 		remoteAddr:    remoteAddr,
 		logger:        logger.With("remote", remoteAddr),
 		buf:           buf,
 		sourceTimeout: sourceTimeout,
+		notifier:      notifier,
 	}
 }
 
@@ -108,7 +111,7 @@ func (h *handler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rtmpms
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancelPublish = cancel
 	go h.stats.run(ctx, h.logger, statsInterval)
-	go h.watchdog.run(ctx, h.logger, h.sourceTimeout)
+	go h.watchdog.run(ctx, h.logger, h.sourceTimeout, h.notifier, h.streamKey)
 
 	return nil
 }

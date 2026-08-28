@@ -5,6 +5,7 @@ go 1.27.0
 require (
 	github.com/bluenviron/gortmplib v1.0.1
 	github.com/yutopp/go-rtmp v0.0.7
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -17,5 +18,4 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/yutopp/go-amf0 v0.1.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )
