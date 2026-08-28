@@ -210,18 +210,37 @@
   .dest-meta { font-size: 13px; color: var(--muted); margin-top: 4px; word-break: break-word; }
   .dest-actions { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
 
-  .edit-form {
+  /* Both Add and Edit open this same modal (see openModal in the script)
+     instead of one being inlined into the destinations list and the other
+     into a dedicated container at the bottom of the page — a modal is
+     always in view regardless of scroll position or list length, which a
+     form appended after a long list is not. */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    z-index: 1000;
+  }
+  .modal-dialog {
     background: var(--card-bg);
-    border: 1px solid var(--accent);
     border-radius: 10px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
     padding: 16px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+    width: 100%;
+    max-width: 440px;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
   }
-  .edit-form .form-title { font-weight: 600; margin-bottom: 4px; }
-  .edit-form label { font-size: 13px; color: var(--muted); margin-top: 6px; }
-  .edit-form input[type=text], .edit-form input[type=password] {
+  .modal-dialog .form-title { font-weight: 600; margin-bottom: 4px; font-size: 16px; }
+  .modal-dialog label { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .modal-dialog input[type=text], .modal-dialog input[type=password] {
     min-height: 44px;
     font-size: 16px;
     padding: 0 10px;
@@ -231,16 +250,20 @@
     color: var(--text);
     width: 100%;
   }
-  .edit-form .hint { color: var(--muted); font-weight: normal; font-size: 12px; }
-  .edit-form .key-wrap { display: flex; gap: 8px; }
-  .edit-form .key-wrap input { flex: 1; }
-  .edit-form .checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--text); }
-  .edit-form .checkbox-label input { width: 20px; height: 20px; }
-  .edit-form .warn { font-size: 13px; color: var(--yellow); }
-  .edit-form .form-error { color: var(--red); font-size: 14px; }
-  .edit-form .form-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .modal-dialog .hint { color: var(--muted); font-weight: normal; font-size: 12px; }
+  .modal-dialog .url-key-hint { color: var(--yellow); font-size: 12px; margin-top: 4px; display: none; }
+  .modal-dialog .key-wrap { display: flex; gap: 8px; }
+  .modal-dialog .key-wrap input { flex: 1; }
+  .modal-dialog .checkbox-label { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--text); }
+  .modal-dialog .checkbox-label input { width: 20px; height: 20px; }
+  .modal-dialog .warn { font-size: 13px; color: var(--yellow); }
+  .modal-dialog .form-error { color: var(--red); font-size: 14px; }
+  .modal-dialog .form-actions { display: flex; gap: 8px; margin-top: 6px; }
 
-  #add-form-container { margin-top: 12px; display: none; }
+  @media (max-width: 768px) {
+    .modal-overlay { align-items: flex-start; padding: 10px; }
+    .modal-dialog { max-width: none; margin-top: 10px; }
+  }
 
   #tablet-panel {
     display: none;
@@ -334,7 +357,6 @@
     </span>
   </h2>
   <div class="dest-list" id="destinations-list"></div>
-  <div id="add-form-container"></div>
 </section>
 
 <script>
@@ -444,9 +466,17 @@ window.addEventListener('unhandledrejection', function (e) {
 
   var outputsConfig = [];   // GET /outputs: name/url/key/delay/enabled (+ live fields, unused here)
   var liveByName = {};      // GET /status .outputs, refreshed every 1s
-  var editingName = null;
-  var editFormEl = null;
-  var addFormEl = null;
+
+  // renderedRowOrder/rowRefs — what's ACTUALLY in #destinations-list right
+  // now: the list of names in DOM order, and per-name references to the
+  // sub-elements of each row (see buildViewRow). renderDestinations uses
+  // these to tell "the same outputs, just refresh the numbers" apart from
+  // "the set changed, rebuild" — see renderDestinations for why this matters.
+  // Add/Edit are a modal now (see openModal) and no longer live inside this
+  // list at all, so this polling-driven render never needs to pause for
+  // them — nothing it touches is ever what the operator is typing into.
+  var renderedRowOrder = [];
+  var rowRefs = {};
 
   // pendingByName — one entry per output with a Start/Stop/Delete request
   // in flight (Edit's own Save button tracks its own pending state locally,
@@ -478,7 +508,9 @@ window.addEventListener('unhandledrejection', function (e) {
 
   // ---- status polling ----------------------------------------------------
 
-  function showAuthError() { document.getElementById('auth-error').style.display = ''; }
+  // 'block', not '' — #auth-error's CSS rule sets display:none itself (not
+  // just an inline attribute), so clearing an inline override does nothing.
+  function showAuthError() { document.getElementById('auth-error').style.display = 'block'; }
   function hideAuthError() { document.getElementById('auth-error').style.display = 'none'; }
 
   function renderStatus(s) {
@@ -621,23 +653,56 @@ window.addEventListener('unhandledrejection', function (e) {
     renderDestinations();
   }
 
+  // renderDestinations runs on every status/outputs poll tick AND after
+  // every direct user action (toggleRun/doDelete change pendingByName and
+  // want the spinner to show immediately; Add/Edit's afterSave wants the
+  // fresh row to show up right away too) — same function either way, no
+  // special-casing needed, because Add/Edit are a modal now (see
+  // openModal/buildOutputForm) and never touch this list's DOM at all.
+  //
+  // Two render paths:
+  //  - Same set of names, same order as last render: update the EXISTING
+  //    row nodes in place (updateViewRow) — no node is created, removed, or
+  //    moved, so nothing flickers.
+  //  - Anything else (outputs added/removed/renamed/reordered): full
+  //    rebuild.
   function renderDestinations() {
     var container = document.getElementById('destinations-list');
-    var frag = document.createDocumentFragment();
+
     if (outputsConfig.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'muted';
-      empty.textContent = 'No outputs configured yet.';
-      frag.appendChild(empty);
-    }
-    outputsConfig.forEach(function (o) {
-      if (o.name === editingName && editFormEl) {
-        frag.appendChild(editFormEl);
-      } else {
-        frag.appendChild(renderViewRow(o, liveByName[o.name]));
+      if (renderedRowOrder.length !== 0 || container.children.length === 0) {
+        container.replaceChildren();
+        var empty = document.createElement('div');
+        empty.className = 'muted';
+        empty.textContent = 'No outputs configured yet.';
+        container.appendChild(empty);
       }
+      renderedRowOrder = [];
+      rowRefs = {};
+      return;
+    }
+
+    var desiredNames = outputsConfig.map(function (o) { return o.name; });
+    var sameSet = desiredNames.length === renderedRowOrder.length &&
+      desiredNames.every(function (n, i) { return n === renderedRowOrder[i]; });
+
+    if (!sameSet) {
+      var frag = document.createDocumentFragment();
+      var newRefs = {};
+      outputsConfig.forEach(function (o) {
+        var refs = buildViewRow(o, liveByName[o.name]);
+        newRefs[o.name] = refs;
+        frag.appendChild(refs.el);
+      });
+      container.replaceChildren(frag);
+      rowRefs = newRefs;
+      renderedRowOrder = desiredNames;
+      return;
+    }
+
+    outputsConfig.forEach(function (o) {
+      updateViewRow(rowRefs[o.name], o, liveByName[o.name]);
     });
-    container.replaceChildren(frag);
   }
 
   function maskKey(key) {
@@ -645,18 +710,69 @@ window.addEventListener('unhandledrejection', function (e) {
     return key.slice(0, Math.min(4, key.length)) + '…';
   }
 
-  function renderViewRow(o, live) {
+  // buildViewRow creates the DOM once for a row and wires up its (fixed for
+  // the row's lifetime) click handlers, then delegates the actual content to
+  // updateViewRow — same function used later to refresh it in place.
+  function buildViewRow(o, live) {
     var div = document.createElement('div');
     div.className = 'dest-row';
+    div.innerHTML =
+      '<div class="dest-main">' +
+      '  <div class="dest-name"><span class="dot"></span><strong></strong></div>' +
+      '  <div class="dest-url"></div>' +
+      '  <div class="dest-meta"></div>' +
+      '</div>' +
+      '<div class="dest-actions">' +
+      '  <button class="btn start-stop"></button>' +
+      '  <button class="btn edit" title="Editing restarts this output (~2s interruption)">Edit</button>' +
+      '  <button class="btn danger delete"></button>' +
+      '</div>';
+
+    var refs = {
+      el: div,
+      dot: div.querySelector('.dot'),
+      nameEl: div.querySelector('.dest-name strong'),
+      url: div.querySelector('.dest-url'),
+      meta: div.querySelector('.dest-meta'),
+      startStop: div.querySelector('.start-stop'),
+      edit: div.querySelector('.edit'),
+      del: div.querySelector('.delete'),
+      _running: false
+    };
+
+    refs.nameEl.textContent = o.name;
+    refs.startStop.addEventListener('click', function () { toggleRun(o.name, refs._running); });
+    refs.edit.addEventListener('click', function () { openEdit(o.name); });
+    refs.del.addEventListener('click', function () { doDelete(o.name); });
+
+    updateViewRow(refs, o, live);
+
+    return refs;
+  }
+
+  // updateViewRow writes o/live/pendingByName into an EXISTING row's
+  // sub-elements — text/attribute assignment only, never touches the row's
+  // own DOM structure or its parent. Guards each write with a
+  // != comparison so unrelated ticks (e.g. only the source card changed)
+  // don't even dirty rows whose content didn't actually change.
+  function updateViewRow(refs, o, live) {
     var state = live ? live.state : 'stopped';
     var running = state !== 'stopped';
+    refs._running = running;
+
     var color = colorFor(state, live && live.last_error);
+    var dotClass = 'dot ' + color;
+    if (refs.dot.className !== dotClass) refs.dot.className = dotClass;
+
+    var urlHtml = esc(o.url) + '<span class="key-badge" title="stream key (masked)">key: ' + esc(maskKey(o.key)) + '</span>';
+    if (refs.url.innerHTML !== urlHtml) refs.url.innerHTML = urlHtml;
 
     var meta = 'delay ' + esc(o.delay) + ' · ' + (o.enabled ? 'enabled' : 'disabled');
     if (live) {
       meta += ' · ' + esc(stateLabel(live.state));
       if (live.last_error) meta += ' — ' + esc(truncate(live.last_error, 90));
     }
+    if (refs.meta.innerHTML !== meta) refs.meta.innerHTML = meta;
 
     // While ANY operation on this output is in flight, every button on the
     // card is disabled (not just the one clicked) and the relevant one
@@ -665,28 +781,15 @@ window.addEventListener('unhandledrejection', function (e) {
     // gap that let a double-click open two connections to the destination.
     var pending = pendingByName[o.name];
     var busy = !!pending;
-    var disabledAttr = busy ? ' disabled' : '';
-    var startStopLabel = (running ? 'Stop' : 'Start');
+    var startStopLabel = running ? 'Stop' : 'Start';
     if (busy && (pending.action === 'start' || pending.action === 'stop')) startStopLabel = '⏳';
     var deleteLabel = (busy && pending.action === 'delete') ? '⏳' : 'Delete';
 
-    div.innerHTML =
-      '<div class="dest-main">' +
-      '  <div class="dest-name"><span class="dot ' + color + '"></span><strong>' + esc(o.name) + '</strong></div>' +
-      '  <div class="dest-url">' + esc(o.url) + '<span class="key-badge" title="stream key (masked)">key: ' + esc(maskKey(o.key)) + '</span></div>' +
-      '  <div class="dest-meta">' + meta + '</div>' +
-      '</div>' +
-      '<div class="dest-actions">' +
-      '  <button class="btn start-stop"' + disabledAttr + '>' + startStopLabel + '</button>' +
-      '  <button class="btn edit"' + disabledAttr + ' title="Editing restarts this output (~2s interruption)">Edit</button>' +
-      '  <button class="btn danger delete"' + disabledAttr + '>' + deleteLabel + '</button>' +
-      '</div>';
-
-    div.querySelector('.start-stop').addEventListener('click', function () { toggleRun(o.name, running); });
-    div.querySelector('.edit').addEventListener('click', function () { openEdit(o.name); });
-    div.querySelector('.delete').addEventListener('click', function () { doDelete(o.name); });
-
-    return div;
+    if (refs.startStop.textContent !== startStopLabel) refs.startStop.textContent = startStopLabel;
+    if (refs.del.textContent !== deleteLabel) refs.del.textContent = deleteLabel;
+    refs.startStop.disabled = busy;
+    refs.edit.disabled = busy;
+    refs.del.disabled = busy;
   }
 
   async function toggleRun(name, running) {
@@ -743,42 +846,96 @@ window.addEventListener('unhandledrejection', function (e) {
   }
 
   function openEdit(name) {
-    editingName = name;
     var o = outputsConfig.find(function (x) { return x.name === name; });
-    editFormEl = buildOutputForm({
-      title: 'Edit ' + name,
-      initial: o,
-      onCancel: closeEdit,
-      onSave: function (input) {
-        return fetchWithTimeout('/outputs/' + encodeURIComponent(name), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(input)
-        });
-      },
-      afterSave: function () { closeEdit(); refreshOutputsConfig(); }
+    openModal(function (dialog, close) {
+      buildOutputForm(dialog, {
+        title: 'Edit ' + name,
+        initial: o,
+        onCancel: close,
+        onSave: function (input) {
+          return fetchWithTimeout('/outputs/' + encodeURIComponent(name), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(input)
+          });
+        },
+        afterSave: function () { close(); refreshOutputsConfig(); }
+      });
     });
-    renderDestinations();
   }
 
-  function closeEdit() {
-    editingName = null;
-    editFormEl = null;
-    renderDestinations();
+  // ---- modal -------------------------------------------------------------
+  //
+  // Both Add and Edit are a centered modal dialog on a dimmed backdrop —
+  // always in view regardless of scroll position or how long the
+  // destinations list is, unlike a form inlined at the bottom of the page
+  // (the previous design, which an operator could easily open without ever
+  // scrolling to). Esc, a click on the backdrop, or Cancel all close it the
+  // same way.
+
+  var activeModal = null;
+
+  function openModal(buildContent) {
+    closeModal();
+
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    var dialog = document.createElement('div');
+    dialog.className = 'modal-dialog';
+    overlay.appendChild(dialog);
+
+    function onKeydown(e) {
+      if (e.key === 'Escape') close();
+    }
+    function close() {
+      document.removeEventListener('keydown', onKeydown);
+      overlay.remove();
+      if (activeModal && activeModal.overlay === overlay) activeModal = null;
+    }
+    overlay.addEventListener('click', function (e) {
+      if (e.target === overlay) close();
+    });
+    document.addEventListener('keydown', onKeydown);
+
+    document.body.appendChild(overlay);
+    activeModal = { overlay: overlay, dialog: dialog, close: close };
+
+    buildContent(dialog, close);
+
+    var firstField = dialog.querySelector('input, button');
+    if (firstField) firstField.focus();
   }
 
-  function buildOutputForm(opts) {
+  function closeModal() {
+    if (activeModal) activeModal.close();
+  }
+
+  // looksLikeKeyInUrl — best-effort heuristic for "the operator pasted a
+  // full rtmp://host/app/key URL into the Server URL field instead of just
+  // the app part". Anything with 2+ path segments after the host is
+  // suspicious (a normal server URL is just the app, e.g.
+  // "rtmp://a.rtmp.youtube.com/live2" — one segment). This ONLY drives a
+  // text hint — nothing is moved automatically. An earlier version of this
+  // form had a third "Full RTMP URL" field that auto-split into the other
+  // two on blur; it ended up fighting with direct edits to those two fields
+  // and overwriting whatever the operator had just typed, so it's gone
+  // entirely — two fields, exactly what's typed into them is what's saved.
+  function looksLikeKeyInUrl(url) {
+    var m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/]+\/(.*)$/.exec(url.trim());
+    if (!m) return false;
+    var segments = m[1].split('/').filter(Boolean);
+    return segments.length >= 2;
+  }
+
+  function buildOutputForm(dialog, opts) {
     var o = opts.initial || { name: '', url: '', key: '', delay: '0s', enabled: true };
-    var div = document.createElement('div');
-    div.className = 'edit-form';
-    div.innerHTML =
+    dialog.innerHTML =
       '<div class="form-title">' + esc(opts.title) + '</div>' +
       '<label>Name</label>' +
       '<input type="text" class="f-name" value="' + esc(o.name) + '">' +
-      '<label>Full RTMP URL <span class="hint">(paste here — splits into the two fields below)</span></label>' +
-      '<input type="text" class="f-full" placeholder="rtmp://host/app/streamkey">' +
       '<label>Server URL</label>' +
-      '<input type="text" class="f-url" value="' + esc(o.url) + '">' +
+      '<input type="text" class="f-url" value="' + esc(o.url) + '" placeholder="rtmp://a.rtmp.youtube.com/live2">' +
+      '<div class="url-key-hint">This looks like it includes the stream key — move it to the Stream Key field below.</div>' +
       '<label>Stream Key</label>' +
       '<div class="key-wrap">' +
       '  <input type="password" class="f-key" value="' + esc(o.key) + '">' +
@@ -794,29 +951,25 @@ window.addEventListener('unhandledrejection', function (e) {
       '  <button class="btn f-cancel">Cancel</button>' +
       '</div>';
 
-    var fullInput = div.querySelector('.f-full');
-    var urlInput = div.querySelector('.f-url');
-    var keyInput = div.querySelector('.f-key');
+    var urlInput = dialog.querySelector('.f-url');
+    var keyInput = dialog.querySelector('.f-key');
+    var urlHint = dialog.querySelector('.url-key-hint');
 
-    fullInput.addEventListener('blur', function () {
-      var v = fullInput.value.trim().replace(/\/+$/, '');
-      if (!v) return;
-      var idx = v.lastIndexOf('/');
-      if (idx < 0) return;
-      urlInput.value = v.slice(0, idx);
-      keyInput.value = v.slice(idx + 1);
-      fullInput.value = '';
-    });
+    function updateUrlHint() {
+      urlHint.style.display = looksLikeKeyInUrl(urlInput.value) ? 'block' : 'none';
+    }
+    urlInput.addEventListener('input', updateUrlHint);
+    updateUrlHint();
 
-    var toggleBtn = div.querySelector('.toggle-key');
+    var toggleBtn = dialog.querySelector('.toggle-key');
     toggleBtn.addEventListener('click', function () {
       var showing = keyInput.type === 'text';
       keyInput.type = showing ? 'password' : 'text';
       toggleBtn.textContent = showing ? 'Show' : 'Hide';
     });
 
-    var saveBtn = div.querySelector('.f-save');
-    var cancelBtn = div.querySelector('.f-cancel');
+    var saveBtn = dialog.querySelector('.f-save');
+    var cancelBtn = dialog.querySelector('.f-cancel');
 
     cancelBtn.addEventListener('click', function () { opts.onCancel(); });
 
@@ -824,13 +977,13 @@ window.addEventListener('unhandledrejection', function (e) {
       if (saveBtn.disabled) return; // a save is already in flight for this form
 
       var input = {
-        name: div.querySelector('.f-name').value.trim(),
+        name: dialog.querySelector('.f-name').value.trim(),
         url: urlInput.value.trim(),
         key: keyInput.value,
-        delay: div.querySelector('.f-delay').value.trim() || '0s',
-        enabled: div.querySelector('.f-enabled').checked
+        delay: dialog.querySelector('.f-delay').value.trim() || '0s',
+        enabled: dialog.querySelector('.f-enabled').checked
       };
-      var errEl = div.querySelector('.form-error');
+      var errEl = dialog.querySelector('.form-error');
       errEl.style.display = 'none';
 
       var origLabel = saveBtn.textContent;
@@ -858,42 +1011,24 @@ window.addEventListener('unhandledrejection', function (e) {
         saveBtn.textContent = origLabel;
       }
     });
-
-    return div;
   }
 
   document.getElementById('add-btn').addEventListener('click', function () {
-    var container = document.getElementById('add-form-container');
-    if (addFormEl) {
-      addFormEl = null;
-      container.replaceChildren();
-      container.style.display = 'none';
-      return;
-    }
-    addFormEl = buildOutputForm({
-      title: 'Add output',
-      initial: null,
-      onCancel: function () {
-        addFormEl = null;
-        container.replaceChildren();
-        container.style.display = 'none';
-      },
-      onSave: function (input) {
-        return fetchWithTimeout('/outputs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(input)
-        });
-      },
-      afterSave: function () {
-        addFormEl = null;
-        container.replaceChildren();
-        container.style.display = 'none';
-        refreshOutputsConfig();
-      }
+    openModal(function (dialog, close) {
+      buildOutputForm(dialog, {
+        title: 'Add output',
+        initial: null,
+        onCancel: close,
+        onSave: function (input) {
+          return fetchWithTimeout('/outputs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(input)
+          });
+        },
+        afterSave: function () { close(); refreshOutputsConfig(); }
+      });
     });
-    container.replaceChildren(addFormEl);
-    container.style.display = '';
   });
 
   // ---- tablet link panel ---------------------------------------------

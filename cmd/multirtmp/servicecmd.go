@@ -1,13 +1,25 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"multirtmp/internal/config"
 	"multirtmp/internal/winservice"
 )
+
+// startVerifyDelay — сколько ждать после запроса на старт службы, прежде чем
+// проверять, что она реально поднялась. StartService лишь просит SCM
+// запустить процесс и возвращается сразу — если конфиг невалиден или
+// произошла любая другая PermanentError-ошибка, процесс успевает выйти почти
+// мгновенно (см. internal/winservice/handler.go), и без этой паузы "started"
+// напечатается для службы, которая уже упала.
+const startVerifyDelay = 3 * time.Second
 
 const (
 	serviceName        = "multirtmp"
@@ -100,7 +112,52 @@ func cmdStart() {
 		os.Exit(1)
 	}
 
+	time.Sleep(startVerifyDelay)
+
+	st, err := winservice.QueryStatus(serviceName)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp start: failed to verify status:", err)
+		os.Exit(1)
+	}
+
+	if st != "running" {
+		fmt.Fprintf(os.Stderr, "multirtmp start: service did not start (state: %s)\n", st)
+		if line, ok := lastErrorLogLine(); ok {
+			fmt.Fprintln(os.Stderr, "last error in multirtmp.log:", line)
+		} else {
+			fmt.Fprintln(os.Stderr, "no ERROR line found in multirtmp.log — check Windows Event Viewer")
+		}
+		os.Exit(1)
+	}
+
 	fmt.Println("service started:", serviceName)
+}
+
+// lastErrorLogLine возвращает последнюю строку уровня ERROR из
+// multirtmp.log (рядом с exe — см. cmd/multirtmp/logging.go), если такая
+// есть. Используется cmdStart, чтобы оператору не приходилось лезть в лог
+// руками при неудачном старте — самая частая причина (невалидный
+// config.json) уже есть текстом в этой самой строке.
+func lastErrorLogLine() (string, bool) {
+	logPath := filepath.Join(filepath.Dir(mustExecutable()), "multirtmp.log")
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+
+	var last string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "level=ERROR") {
+			last = line
+		}
+	}
+
+	return last, last != ""
 }
 
 func cmdStop() {

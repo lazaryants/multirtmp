@@ -54,6 +54,19 @@ func parseOutputURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("invalid RTMP URL: %w", err)
 	}
 
+	// Checked here, not left to gortmplib.Client.Initialize (which rejects
+	// the same thing with "unsupported scheme: %s") — that error would land
+	// in dial()'s handshake-rejected bucket ("output: config: rtmp handshake
+	// rejected (check url/key): ..."), which is misleading: a bad scheme is
+	// caught before any network I/O or RTMP handshake is even attempted, so
+	// telling the operator a handshake was "rejected" is simply false.
+	// Catching it here instead routes it through dial()'s existing
+	// "output: invalid url: %w" wrap, same bucket as the "must have at least
+	// app/streamKey" check below.
+	if u.Scheme != "rtmp" && u.Scheme != "rtmps" {
+		return nil, fmt.Errorf("unsupported scheme %q — use rtmp:// or rtmps://", u.Scheme)
+	}
+
 	if u.Fragment != "" {
 		// уже в форме app#key — ничего конвертировать не нужно.
 		return u, nil

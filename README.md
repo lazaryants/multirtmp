@@ -47,6 +47,10 @@ server itself.
 automatically the first time you run the exe without one — see the comments
 in the generated file for what each field does and its default.
 
+Each destination's Server URL accepts either `rtmp://` or `rtmps://` (RTMP
+over TLS, typically port 443) — use `rtmps://` for a destination that
+requires or prefers an encrypted connection.
+
 ## Optional live preview
 
 The web interface can embed a live preview player below the status section.

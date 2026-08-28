@@ -19,6 +19,16 @@ const (
 	// двойным запасом: даже полный обрыв связи на время реконнекта не должен
 	// вытолкнуть из буфера то, что делавшему delay-выходу ещё нужно.
 	bufferAutoRetention = 60 * time.Second
+
+	// bufferLogThreshold — на Info логируется только изменение размера
+	// больше этой доли от последнего ЗАЛОГИРОВАННОГО (не последнего
+	// применённого) значения. Реальный битрейт колеблется в единицы
+	// процентов тик от тика (I-кадры крупнее P-кадров и т.п.) — без порога
+	// это 2с*N логов на весь 8-часовой матч, которые вытесняют из ротации
+	// всё действительно важное. Сам буфер (SetCapacity) при этом
+	// подстраивается под каждое изменение независимо от порога — порог
+	// только про логирование, не про то, какого размера буфер на самом деле.
+	bufferLogThreshold = 0.20
 )
 
 // runBufferAutosize периодически пересчитывает ёмкость buf как
@@ -43,7 +53,8 @@ func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Serv
 	ticker := time.NewTicker(bufferAutoInterval)
 	defer ticker.Stop()
 
-	lastSize := int64(-1)
+	lastSize := int64(-1)       // последний размер, реально применённый к buf — не пропускать SetCapacity на неизменившемся значении
+	lastLoggedSize := int64(-1) // последний размер, о котором писали на Info — база для порога bufferLogThreshold
 
 	for {
 		select {
@@ -80,12 +91,24 @@ func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Serv
 
 			buf.SetCapacity(size)
 
-			logger.Info("buffer: resized",
+			attrs := []any{
 				"bytes", size,
 				"kbps", kbps,
 				"max_delay", currentMaxDelay,
 				"retention_s", round(float64(size)/bytesPerSec, 1),
-			)
+			}
+
+			// Первое измерение всегда значимо (lastLoggedSize ещё не
+			// задан); дальше — только колебание больше bufferLogThreshold
+			// от прошлого залогированного, иначе — Debug, не Info.
+			significant := lastLoggedSize < 0 ||
+				math.Abs(float64(size-lastLoggedSize))/float64(lastLoggedSize) >= bufferLogThreshold
+			if significant {
+				logger.Info("buffer: resized", attrs...)
+				lastLoggedSize = size
+			} else {
+				logger.Debug("buffer: resized", attrs...)
+			}
 		}
 	}
 }
