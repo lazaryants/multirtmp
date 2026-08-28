@@ -351,6 +351,13 @@
       streaming: 'STREAMING',
       connecting: 'CONNECTING',
       waiting_for_source: 'WAITING FOR SOURCE',
+      // Registry-level, overlaid on top of the worker's own state while a
+      // Start/Stop/Edit/Delete is actually being processed server-side (see
+      // internal/output/registry.go) — tells the operator their click landed,
+      // instead of leaving waiting_for_source to mean both "just clicked
+      // Start" and "nobody's touched this in an hour".
+      starting: 'STARTING',
+      stopping: 'STOPPING',
       // Start/Stop now persist to config.json (see outputs_store.go) —
       // "stopped" always means the operator's choice is remembered, not just
       // this session's runtime state, so say so here rather than leaving it
@@ -365,6 +372,18 @@
     if (state === 'stopped') return 'grey';
     if (lastError) return 'red';
     return 'yellow';
+  }
+
+  // fetchWithTimeout aborts the request after 15s so a stalled network never
+  // leaves a button disabled forever — see pendingByName below, which is the
+  // primary timeout mechanism (driven by /status polling); this is just a
+  // courtesy so the underlying fetch doesn't linger unbounded in the
+  // background after the UI has already given up on it.
+  function fetchWithTimeout(url, opts) {
+    var controller = new AbortController();
+    var timer = setTimeout(function () { controller.abort(); }, 15000);
+    opts = Object.assign({}, opts, { signal: controller.signal });
+    return authFetch(url, opts).finally(function () { clearTimeout(timer); });
   }
 
   function formatUptime(sec) {
@@ -382,6 +401,34 @@
   var editingName = null;
   var editFormEl = null;
   var addFormEl = null;
+
+  // pendingByName — one entry per output with a Start/Stop/Delete request
+  // in flight (Edit's own Save button tracks its own pending state locally,
+  // see buildOutputForm — there's no row to protect while its form is open).
+  // Backed by the server being genuinely synchronous (Start/Stop/Replace/
+  // Remove don't return until the operation is actually done — see
+  // internal/output/registry.go), so the normal path clears on the very
+  // next /status tick right after the response comes back; the deadline is
+  // what protects against a lost response (network drop) — checkPending
+  // keeps polling for the expected state until it shows up or 15s pass.
+  var pendingByName = {};
+
+  function beginPending(name, action, expect) {
+    pendingByName[name] = { action: action, expect: expect, deadline: Date.now() + 15000 };
+  }
+
+  function checkPending() {
+    var now = Date.now();
+    Object.keys(pendingByName).forEach(function (name) {
+      var p = pendingByName[name];
+      if (p.expect(liveByName[name])) {
+        delete pendingByName[name];
+      } else if (now > p.deadline) {
+        delete pendingByName[name];
+        alert(p.action + ' timed out after 15s for "' + name + '" — check the server log.');
+      }
+    });
+  }
 
   // ---- status polling ----------------------------------------------------
 
@@ -418,6 +465,7 @@
 
     liveByName = {};
     s.outputs.forEach(function (o) { liveByName[o.name] = o; });
+    checkPending();
     renderDestinations();
   }
 
@@ -528,6 +576,18 @@
       if (live.last_error) meta += ' — ' + esc(truncate(live.last_error, 90));
     }
 
+    // While ANY operation on this output is in flight, every button on the
+    // card is disabled (not just the one clicked) and the relevant one
+    // shows a spinner instead of its label — a second click can't slip
+    // through while we're still waiting to hear back, which is exactly the
+    // gap that let a double-click open two connections to the destination.
+    var pending = pendingByName[o.name];
+    var busy = !!pending;
+    var disabledAttr = busy ? ' disabled' : '';
+    var startStopLabel = (running ? 'Stop' : 'Start');
+    if (busy && (pending.action === 'start' || pending.action === 'stop')) startStopLabel = '⏳';
+    var deleteLabel = (busy && pending.action === 'delete') ? '⏳' : 'Delete';
+
     div.innerHTML =
       '<div class="dest-main">' +
       '  <div class="dest-name"><span class="dot ' + color + '"></span><strong>' + esc(o.name) + '</strong></div>' +
@@ -535,9 +595,9 @@
       '  <div class="dest-meta">' + meta + '</div>' +
       '</div>' +
       '<div class="dest-actions">' +
-      '  <button class="btn start-stop">' + (running ? 'Stop' : 'Start') + '</button>' +
-      '  <button class="btn edit" title="Editing restarts this output (~2s interruption)">Edit</button>' +
-      '  <button class="btn danger delete">Delete</button>' +
+      '  <button class="btn start-stop"' + disabledAttr + '>' + startStopLabel + '</button>' +
+      '  <button class="btn edit"' + disabledAttr + ' title="Editing restarts this output (~2s interruption)">Edit</button>' +
+      '  <button class="btn danger delete"' + disabledAttr + '>' + deleteLabel + '</button>' +
       '</div>';
 
     div.querySelector('.start-stop').addEventListener('click', function () { toggleRun(o.name, running); });
@@ -548,20 +608,56 @@
   }
 
   async function toggleRun(name, running) {
-    var path = running ? 'stop' : 'start';
-    await authFetch('/outputs/' + encodeURIComponent(name) + '/' + path, { method: 'POST' });
+    if (pendingByName[name]) return; // belt-and-suspenders: buttons are already disabled while busy
+    var action = running ? 'stop' : 'start';
+    beginPending(name, action, function (live) {
+      return running
+        ? (!live || live.state === 'stopped')
+        : (!!live && live.state !== 'starting' && live.state !== 'stopped');
+    });
+    renderDestinations();
+
+    try {
+      var res = await fetchWithTimeout('/outputs/' + encodeURIComponent(name) + '/' + action, { method: 'POST' });
+      if (!res.ok) {
+        var body = await res.json().catch(function () { return { error: 'request failed' }; });
+        delete pendingByName[name];
+        alert(body.error || 'request failed');
+        renderDestinations();
+        return;
+      }
+    } catch (e) {
+      // Aborted (15s) or a genuine network error — leave it pending.
+      // checkPending's own deadline (same 15s, started at the click) picks
+      // this up on the next /status tick: confirms success if the state
+      // actually changed despite the lost response, times out cleanly
+      // otherwise.
+    }
     fetchStatus();
   }
 
   async function doDelete(name) {
+    if (pendingByName[name]) return;
     if (!confirm("Delete output '" + name + "'? This cannot be undone.")) return;
-    var res = await authFetch('/outputs/' + encodeURIComponent(name), { method: 'DELETE' });
-    if (res.ok) {
-      refreshOutputsConfig();
-    } else {
-      var body = await res.json().catch(function () { return { error: 'request failed' }; });
-      alert(body.error || 'request failed');
+
+    beginPending(name, 'delete', function () {
+      return !outputsConfig.some(function (o) { return o.name === name; });
+    });
+    renderDestinations();
+
+    try {
+      var res = await fetchWithTimeout('/outputs/' + encodeURIComponent(name), { method: 'DELETE' });
+      if (!res.ok) {
+        var body = await res.json().catch(function () { return { error: 'request failed' }; });
+        delete pendingByName[name];
+        alert(body.error || 'request failed');
+        renderDestinations();
+        return;
+      }
+    } catch (e) {
+      // as above
     }
+    refreshOutputsConfig();
   }
 
   function openEdit(name) {
@@ -572,7 +668,7 @@
       initial: o,
       onCancel: closeEdit,
       onSave: function (input) {
-        return authFetch('/outputs/' + encodeURIComponent(name), {
+        return fetchWithTimeout('/outputs/' + encodeURIComponent(name), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(input)
@@ -637,9 +733,14 @@
       toggleBtn.textContent = showing ? 'Show' : 'Hide';
     });
 
-    div.querySelector('.f-cancel').addEventListener('click', function () { opts.onCancel(); });
+    var saveBtn = div.querySelector('.f-save');
+    var cancelBtn = div.querySelector('.f-cancel');
 
-    div.querySelector('.f-save').addEventListener('click', async function () {
+    cancelBtn.addEventListener('click', function () { opts.onCancel(); });
+
+    saveBtn.addEventListener('click', async function () {
+      if (saveBtn.disabled) return; // a save is already in flight for this form
+
       var input = {
         name: div.querySelector('.f-name').value.trim(),
         url: urlInput.value.trim(),
@@ -649,18 +750,30 @@
       };
       var errEl = div.querySelector('.form-error');
       errEl.style.display = 'none';
+
+      var origLabel = saveBtn.textContent;
+      saveBtn.disabled = true;
+      cancelBtn.disabled = true;
+      saveBtn.textContent = '⏳';
+
       try {
         var res = await opts.onSave(input);
         if (!res.ok) {
           var body = await res.json().catch(function () { return { error: 'request failed' }; });
           errEl.textContent = body.error || 'request failed';
           errEl.style.display = '';
+          saveBtn.disabled = false;
+          cancelBtn.disabled = false;
+          saveBtn.textContent = origLabel;
           return;
         }
         opts.afterSave();
       } catch (e) {
-        errEl.textContent = 'network error: ' + e.message;
+        errEl.textContent = e.name === 'AbortError' ? 'timed out after 15s — check the server log' : 'network error: ' + e.message;
         errEl.style.display = '';
+        saveBtn.disabled = false;
+        cancelBtn.disabled = false;
+        saveBtn.textContent = origLabel;
       }
     });
 
@@ -684,7 +797,7 @@
         container.style.display = 'none';
       },
       onSave: function (input) {
-        return authFetch('/outputs', {
+        return fetchWithTimeout('/outputs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(input)

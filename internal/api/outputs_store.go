@@ -231,10 +231,41 @@ func (s *outputsStore) Delete(name string) error {
 // enabled из файла, будто оператор ничего не нажимал. Автозапуск при
 // появлении источника по-прежнему только для enabled:true — это решается
 // самим фактом персиста, отдельной логики не требуется.
+//
+// registry.Start/Stop вызываются БЕЗ удержания s.mu: Stop может занять
+// несколько секунд (ждёт реального завершения горутины воркера — см.
+// Registry.Stop), а s.mu — это лок всего стора, общий для всех выходов;
+// удержи его на это время, и один медленный Stop заморозил бы
+// старт/стоп/добавление/правку/удаление ЛЮБОГО другого выхода — то самое
+// "один медленный выход не влияет на остальные" из CLAUDE.md, просто на
+// уровне API, а не пейсинга. Сериализация конкретно этого выхода — забота
+// Registry (per-entry opMu), не стора. Отдельно: если registry-вызов
+// вернёт ConflictError (уже запущен/уже остановлен), config.json остаётся
+// нетронутым — нет смысла тратить запись на команду, которая не изменит
+// состояние.
 func (s *outputsStore) SetEnabled(name string, enabled bool) (OutputView, error) {
+	s.mu.Lock()
+	if s.indexOfLocked(name) < 0 {
+		s.mu.Unlock()
+		return OutputView{}, &notFoundError{name}
+	}
+	s.mu.Unlock()
+
+	var opErr error
+	if enabled {
+		opErr = s.registry.Start(name)
+	} else {
+		opErr = s.registry.Stop(name)
+	}
+	if opErr != nil {
+		return OutputView{}, opErr
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Перепроверка: пока registry.Start/Stop выполнялся без s.mu, конкурентный
+	// Delete мог убрать этот выход из конфига совсем.
 	idx := s.indexOfLocked(name)
 	if idx < 0 {
 		return OutputView{}, &notFoundError{name}
@@ -244,20 +275,6 @@ func (s *outputsStore) SetEnabled(name string, enabled bool) (OutputView, error)
 	newOutputs[idx].Enabled = boolPtr(enabled)
 	if err := s.persistLocked(newOutputs); err != nil {
 		return OutputView{}, err
-	}
-
-	var err error
-	if enabled {
-		err = s.registry.Start(name)
-	} else {
-		err = s.registry.Stop(name)
-	}
-	if err != nil {
-		verb := "start"
-		if !enabled {
-			verb = "stop"
-		}
-		return OutputView{}, fmt.Errorf("output config updated but failed to %s: %w", verb, err)
 	}
 
 	return s.viewLocked(name), nil

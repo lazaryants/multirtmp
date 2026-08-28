@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+
+	"multirtmp/internal/output"
 )
 
 func (s *Server) handleOutputsList(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +67,15 @@ func writeOutputsError(w http.ResponseWriter, err error) {
 	var ve *validationError
 	if errors.As(err, &ve) {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// ConflictError — start на уже запущенном, stop на уже остановленном:
+	// the command is well-formed, just meaningless right now. Explicit 409
+	// instead of a silent no-op — see internal/output/registry.go.
+	var ce output.ConflictError
+	if errors.As(err, &ce) {
+		writeError(w, http.StatusConflict, err)
 		return
 	}
 

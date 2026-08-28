@@ -16,7 +16,15 @@ import (
 type State string
 
 const (
-	StateStopped          State = "stopped"
+	StateStopped State = "stopped"
+	// StateStarting/StateStopping — не про сам Worker (он ничего о них не
+	// знает), а про Registry: пока выполняется операция Start/Stop/Replace/
+	// Remove над этим выходом, Registry.Snapshot отдаёт именно их, перекрывая
+	// то, что сообщает Worker.Status(). Нужны оператору как подтверждение
+	// "клик дошёл до сервера и обрабатывается" — без них waiting_for_source
+	// неотличимо от "никто ничего не нажимал".
+	StateStarting         State = "starting"
+	StateStopping         State = "stopping"
 	StateWaitingForSource State = "waiting_for_source"
 	StateConnecting       State = "connecting"
 	StateStreaming        State = "streaming"
