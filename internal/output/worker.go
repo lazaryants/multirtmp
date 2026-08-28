@@ -9,6 +9,7 @@ package output
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -39,19 +40,41 @@ const (
 	// перегрузке/проблеме с ключом), backoff=0 после каждого handshake даёт
 	// шторм мгновенных реконнектов.
 	stableUptime = 10 * time.Second
+
+	// neverConnectedBackoffCeiling — потолок backoff для выхода, который ни
+	// разу за свой жизненный цикл не дошёл до streaming. Обычный потолок 5с
+	// рассчитан на "уже работавшее, временно отвалившееся" направление;
+	// для заведомо неверного url/ключа (например, опечатка в ключе YouTube)
+	// это означает штурм в 12+ попыток в минуту часами — реальный риск
+	// временной блокировки по IP на стороне назначения. После
+	// neverConnectedThreshold подряд неудачных попыток без единого успешного
+	// streaming потолок поднимается сюда; после первого успешного streaming —
+	// навсегда возвращается к обычному backoffSchedule.
+	neverConnectedBackoffCeiling = 60 * time.Second
 )
 
-// backoffSchedule — 0 → 0.5 → 1 → 2 → 5с, дальше 5с бесконечно.
+// backoffSchedule — 0 → 0.5 → 1 → 2 → 5с, дальше 5с (или
+// neverConnectedBackoffCeiling, если выход ни разу не выходил в streaming —
+// см. backoffFor) бесконечно.
 var backoffSchedule = []time.Duration{0, 500 * time.Millisecond, time.Second, 2 * time.Second, 5 * time.Second}
 
-func backoffFor(attempt int) time.Duration {
+// neverConnectedThreshold — после скольких подряд неудачных попыток (без
+// единого успешного streaming) потолок backoff поднимается с 5с до
+// neverConnectedBackoffCeiling. Совпадает с длиной обычного расписания:
+// ровно тот момент, когда мы и так уже упёрлись бы в обычный потолок.
+var neverConnectedThreshold = len(backoffSchedule)
+
+func backoffFor(attempt int, everStreamed bool) time.Duration {
 	if attempt < 0 {
 		attempt = 0
 	}
-	if attempt >= len(backoffSchedule) {
-		return backoffSchedule[len(backoffSchedule)-1]
+	if attempt < len(backoffSchedule) {
+		return backoffSchedule[attempt]
 	}
-	return backoffSchedule[attempt]
+	if !everStreamed {
+		return neverConnectedBackoffCeiling
+	}
+	return backoffSchedule[len(backoffSchedule)-1]
 }
 
 // Worker — воркер одного выхода.
@@ -147,7 +170,20 @@ func (w *Worker) Run(ctx context.Context) {
 		} else {
 			attempt++
 		}
-		wait = backoffFor(attempt)
+
+		everStreamed := w.status.hasEverStreamed()
+		wait = backoffFor(attempt, everStreamed)
+
+		// Ровно момент перехода на повышенный потолок — не на каждой
+		// последующей попытке, иначе это ровно тот шторм (уведомлений),
+		// который мы пытаемся убрать из соединений с назначением.
+		if !everStreamed && attempt == neverConnectedThreshold {
+			w.log.Warn("output: has never connected successfully, check url/key",
+				"attempts", attempt, "backoff_ceiling", neverConnectedBackoffCeiling)
+			w.notifier.Send("output_never_connected:"+w.name, fmt.Sprintf(
+				"Output %q has never connected successfully after %d attempts — check url/key",
+				w.name, attempt))
+		}
 
 		w.log.Warn("output: connection lost, will retry",
 			"error", err, "attempt", attempt, "retry_in", wait, "uptime", uptime)

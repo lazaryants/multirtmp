@@ -63,6 +63,8 @@ type status struct {
 
 	down           bool        // true, если последняя попытка подключения провалилась и мы ещё не восстановились
 	recentFailures []time.Time // метки отказов за последние reconnectRateWindow — для алерта "шторм реконнектов"
+
+	everStreamed bool // true после первого же успешного входа в StateStreaming, дальше не сбрасывается
 }
 
 func newStatus(name string) *status {
@@ -87,6 +89,7 @@ func (s *status) setState(st State, notifier *notify.Notifier) {
 	s.state = st
 	if st == StateStreaming {
 		s.streamStartedAt = time.Now()
+		s.everStreamed = true
 		wasDown := s.down
 		s.down = false
 		name := s.name
@@ -148,6 +151,17 @@ func (s *status) recordReset(err error) {
 		s.lastError = err.Error()
 	}
 	s.mu.Unlock()
+}
+
+// hasEverStreamed сообщает, доходил ли этот выход хоть раз до StateStreaming
+// за весь свой жизненный цикл — используется для эскалации потолка backoff
+// (см. Worker.Run): выход, который ни разу не подключился, скорее всего
+// настроен неверно (url/key), и не должен долбить назначение раз в 5с
+// бесконечно.
+func (s *status) hasEverStreamed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.everStreamed
 }
 
 // Snapshot возвращает текущее состояние для GET /status.

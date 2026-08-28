@@ -2,6 +2,7 @@ package output
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -114,15 +115,41 @@ type conn struct {
 	rw     *rawmessage.Writer
 }
 
+// dialError маркирует ошибку, случившуюся именно на этапе TCP-подключения —
+// то есть до RTMP-рукопожатия. Отличать нужно потому, что причина обычно
+// разная: сеть/адрес недоступны (dialError) vs соединение установилось, но
+// сервер назначения отверг сам RTMP-хендшейк — обычно неверный ключ/URL.
+type dialError struct {
+	err error
+}
+
+func (e *dialError) Error() string { return e.err.Error() }
+func (e *dialError) Unwrap() error { return e.err }
+
 func dial(ctx context.Context, rawURL string) (*conn, error) {
 	u, err := parseOutputURL(rawURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("output: invalid url: %w", err)
 	}
 
-	client := &gortmplib.Client{URL: u, Publish: true}
+	client := &gortmplib.Client{
+		URL:     u,
+		Publish: true,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			nc, err := (&net.Dialer{}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, &dialError{err: err}
+			}
+			return nc, nil
+		},
+	}
+
 	if err := client.Initialize(ctx); err != nil {
-		return nil, fmt.Errorf("output: handshake failed: %w", err)
+		var de *dialError
+		if errors.As(err, &de) {
+			return nil, fmt.Errorf("output: network: connect failed: %w", de.err)
+		}
+		return nil, fmt.Errorf("output: config: rtmp handshake rejected (check url/key): %w", err)
 	}
 
 	nc := client.NetConn()
@@ -143,14 +170,18 @@ func (c *conn) close() {
 // может висеть в Write минутами).
 func (c *conn) sendTag(kind uint8, ts uint32, data []byte) error {
 	if err := c.nc.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
-		return fmt.Errorf("output: failed to set write deadline: %w", err)
+		return fmt.Errorf("output: network: failed to set write deadline: %w", err)
 	}
 
-	return c.rw.Write(&rawmessage.Message{
+	if err := c.rw.Write(&rawmessage.Message{
 		ChunkStreamID:   chunkStreamIDFor(kind),
 		Timestamp:       time.Duration(ts) * time.Millisecond,
 		Type:            kind,
 		MessageStreamID: rtmpMessageStreamID,
 		Body:            data,
-	})
+	}); err != nil {
+		return fmt.Errorf("output: network: write failed: %w", err)
+	}
+
+	return nil
 }

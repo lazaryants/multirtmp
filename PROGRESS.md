@@ -193,3 +193,20 @@ TODO (не в скоупе, не проверено):
 Второй нюанс, всплывший при сценарии реконнекта: воркер не открывает соединение, пока нет готового тега (см. правку ранее в этой же сессии) — значит `h.buf.Reset()` на принимающей стороне срабатывает не в предсказуемый момент, а только после того, как новая публикация реально переподключится. Решено `resilientReader` — обёртка над курсором, которая прозрачно пересоздаёт себя по факту `ErrReset` при чтении, а не по угаданному таймингу.
 
 Проверено: все три теста проходят, 5/5 повторных запусков без флейков (`go test -count=1` в цикле). Пример полученной на принимающей стороне последовательности TS в сценарии 1: `[0x0 0x3d0900 0x7a1200 ... 0x2255100]` — растёт корректно через границу `0xFFFFFF`, без обрезания. В сценарии реконнекта вторая сессия — `[0x0 0x28 0x50 0x78 0xa0]`, подтверждает свежий rebase от нуля, а не продолжение от `0x2255100`. `-race` недоступен в этом окружении (нет CGO — и не нужен, проект и так без CGO), не запускался.
+
+### Правка после ревью: шторм реконнектов на заведомо неверном url/ключе + классификация ошибок (готово)
+
+Репортовалось живым инцидентом: выход `youtube` с неверным ключом сделал 203 реконнекта за 18 минут (`handshake failed: EOF`), стабильно раз в 5с — backoff упёрся в обычный потолок 5с и там остался навсегда. Для заведомо неверного ключа это бессмысленный шторм запросов к чужому серверу — реальный риск временной блокировки по IP.
+
+Исправлено (`internal/output/status.go`, `internal/output/worker.go`):
+- `status.everStreamed` — флаг, `true` после первого же успешного входа в `StateStreaming` за весь жизненный цикл выхода, дальше не сбрасывается (в отличие от `down`, который переключается туда-обратно при каждом реконнекте).
+- `backoffFor(attempt, everStreamed)`: если `everStreamed == false` и `attempt` вышел за пределы обычного `backoffSchedule` (0/0.5/1/2/5с) — потолок не 5с, а `neverConnectedBackoffCeiling = 60s`. После первого успешного `streaming` — навсегда обычное поведение (потолок 5с), даже если выход потом снова начнёт падать.
+- Переход на повышенный потолок логируется ровно один раз (`attempt == neverConnectedThreshold`, не на каждой последующей попытке) — `Warn "output: has never connected successfully, check url/key"` + Telegram-алерт (`output_never_connected:<name>`, троттлинг `notify.Notifier` как у остальных событий).
+
+Классификация `last_error` (`internal/output/conn.go`): `dial()` оборачивает `DialContext` в `dialError` — если сам TCP-коннект не удался (`errors.As` находит `dialError` в цепочке), сообщение получает префикс `"output: network: connect failed: ..."`; если TCP прошёл, но `gortmplib.Client.Initialize` (RTMP handshake) отверг — `"output: config: rtmp handshake rejected (check url/key): ..."`. Раньше оба случая давали одинаково неинформативную ошибку — оператору было непонятно, чинить сеть или ключ.
+
+Проверено живым прогоном: тестовый конфиг с двумя заведомо нерабочими выходами — `cfgerr` (TCP-listener, который принимает соединение и сразу рвёт его, симулируя отказ на handshake) и `neterr` (порт, где никто не слушает), реальный `ffmpeg`-источник кормит ingest, чтобы у обоих выходов были теги на отправку (иначе они по дизайну вообще не доходят до `dial()`):
+- `neterr` → `last_error` = `"output: network: connect failed: dial tcp ...: connectex: No connection could be made because the target machine actively refused it."`
+- `cfgerr` → `last_error` = `"output: config: rtmp handshake rejected (check url/key): read tcp ...: wsarecv: An existing connection was forcibly closed by the remote host."`
+- Эскалация backoff по логу: `attempt=1..4` → `retry_in` `500ms/1s/2s/5s`, на `attempt=5` → `retry_in=1m0s`. Ровно на этом переходе один раз в лог ушло `level=WARN msg="output: has never connected successfully, check url/key" attempts=5 backoff_ceiling=1m0s"` для обоих выходов.
+- `go build`, `go vet`, `gofmt -l`, `go test ./...` — чисто.
