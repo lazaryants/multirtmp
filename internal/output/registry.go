@@ -49,8 +49,16 @@ func (r *Registry) Start(name string) error {
 	if !ok {
 		return fmt.Errorf("unknown output %q", name)
 	}
+	r.startLocked(e)
+
+	return nil
+}
+
+// startLocked запускает воркер entry, если он ещё не запущен. Вызывающий уже
+// держит r.mu.
+func (r *Registry) startLocked(e *registryEntry) {
 	if e.cancel != nil {
-		return nil
+		return
 	}
 
 	ctx, cancel := context.WithCancel(r.ctx)
@@ -62,8 +70,6 @@ func (r *Registry) Start(name string) error {
 		defer close(done)
 		e.worker.Run(ctx)
 	}()
-
-	return nil
 }
 
 // Stop останавливает выход name, если он запущен, и дожидается фактического
@@ -76,17 +82,108 @@ func (r *Registry) Stop(name string) error {
 		r.mu.Unlock()
 		return fmt.Errorf("unknown output %q", name)
 	}
+	done := r.stopLocked(e)
+	r.mu.Unlock()
+
+	if done != nil {
+		<-done
+	}
+
+	return nil
+}
+
+// stopLocked отменяет контекст воркера entry, если он запущен, и возвращает
+// его done-канал для ожидания ВНЕ лока (сам Run() может обращаться к
+// Registry только опосредованно, но дожидаться завершения горутины под r.mu
+// незачем — это удлиняет удержание лока без причины). nil, если уже не
+// запущен. Вызывающий уже держит r.mu.
+func (r *Registry) stopLocked(e *registryEntry) chan struct{} {
 	cancel := e.cancel
 	done := e.done
 	e.cancel = nil
 	e.done = nil
-	r.mu.Unlock()
 
 	if cancel == nil {
 		return nil
 	}
 	cancel()
-	<-done
+
+	return done
+}
+
+// Add регистрирует и (если start) запускает новый выход name. Ошибка, если
+// имя уже занято — в отличие от Register (доверенный путь при старте
+// процесса, где уникальность имён уже проверена валидацией конфига), Add
+// вызывается из HTTP-обработчика на пользовательский ввод.
+func (r *Registry) Add(name string, w *Worker, start bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.items[name]; exists {
+		return fmt.Errorf("output %q already exists", name)
+	}
+
+	e := &registryEntry{worker: w}
+	r.items[name] = e
+	if start {
+		r.startLocked(e)
+	}
+
+	return nil
+}
+
+// Replace останавливает и убирает старый воркер под именем oldName (если он
+// был) и ставит на его место w под именем newName (запуская его, если
+// start) — используется при правке выхода: Worker неизменяем после создания
+// (см. CLAUDE.md — задержка и остальные поля не меняются на лету), поэтому
+// любая правка — это пересоздание воркера, а не изменение существующего.
+// oldName != newName поддерживает переименование заодно со сменой полей.
+func (r *Registry) Replace(oldName, newName string, w *Worker, start bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	old, ok := r.items[oldName]
+	if !ok {
+		return fmt.Errorf("unknown output %q", oldName)
+	}
+
+	if newName != oldName {
+		if _, exists := r.items[newName]; exists {
+			return fmt.Errorf("output %q already exists", newName)
+		}
+	}
+
+	done := r.stopLocked(old)
+	if done != nil {
+		<-done
+	}
+	delete(r.items, oldName)
+
+	e := &registryEntry{worker: w}
+	r.items[newName] = e
+	if start {
+		r.startLocked(e)
+	}
+
+	return nil
+}
+
+// Remove останавливает (если запущен) и убирает выход name. Ошибка, если
+// такого имени нет.
+func (r *Registry) Remove(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e, ok := r.items[name]
+	if !ok {
+		return fmt.Errorf("unknown output %q", name)
+	}
+
+	done := r.stopLocked(e)
+	if done != nil {
+		<-done
+	}
+	delete(r.items, name)
 
 	return nil
 }

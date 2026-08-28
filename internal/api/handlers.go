@@ -10,9 +10,15 @@ import (
 
 type statusResponse struct {
 	Build   buildJSON        `json:"build"`
+	Network networkJSON      `json:"network"`
 	Source  sourceStatusJSON `json:"source"`
 	Buffer  bufferStatusJSON `json:"buffer"`
 	Outputs []output.Status  `json:"outputs"`
+}
+
+type networkJSON struct {
+	LANURL       string `json:"lan_url,omitempty"`
+	FirewallHint string `json:"firewall_hint,omitempty"`
 }
 
 type buildJSON struct {
@@ -62,8 +68,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	bufStats := s.buf.Stats()
 
 	resp := statusResponse{
-		Build:  buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
-		Source: sj,
+		Build:   buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
+		Network: networkJSON{LANURL: s.network.LANURL, FirewallHint: s.network.FirewallHint},
+		Source:  sj,
 		Buffer: bufferStatusJSON{
 			Bytes:     bufStats.Bytes,
 			Tags:      bufStats.Tags,
@@ -76,26 +83,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleOutputStart/handleOutputStop persist the operator's choice as
+// enabled in config.json (via outputsStore.SetEnabled), not just the live
+// Registry state — see outputs_store.go for why.
 func (s *Server) handleOutputStart(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	if err := s.registry.Start(name); err != nil {
-		writeError(w, http.StatusNotFound, err)
+	view, err := s.outputs.SetEnabled(name, true)
+	if err != nil {
+		writeOutputsError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) handleOutputStop(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	if err := s.registry.Stop(name); err != nil {
-		writeError(w, http.StatusNotFound, err)
+	view, err := s.outputs.SetEnabled(name, false)
+	if err != nil {
+		writeOutputsError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": name})
+	writeJSON(w, http.StatusOK, view)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

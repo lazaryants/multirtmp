@@ -22,12 +22,18 @@ const (
 )
 
 // runBufferAutosize периодически пересчитывает ёмкость buf как
-// (maxDelay + bufferAutoRetention) * измеренный битрейт источника,
+// (maxDelay() + bufferAutoRetention) * измеренный битрейт источника,
 // ограничивая результат [config.BufferMinSize, maxSize]. Активен только пока
 // buffer.size не задан явно в конфиге (см. cfg.BufferAuto) — до первой
 // публикации, пока измерить нечего, буфер остаётся на начальном
 // config.BufferMinSize.
-func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Server, logger *slog.Logger, maxDelay time.Duration, maxSize int64) {
+//
+// maxDelay — функция, а не фиксированное значение: выходы теперь можно
+// добавлять/менять через веб-интерфейс уже после старта процесса (см.
+// internal/api/outputs_store.go), и максимальная задержка среди них может
+// вырасти в любой момент — буфер должен успевать подстроиться, а не
+// оставаться рассчитанным на набор выходов, каким он был при запуске.
+func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Server, logger *slog.Logger, maxDelay func() time.Duration, maxSize int64) {
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("main: panic in buffer autosize goroutine", "panic", r)
@@ -37,7 +43,6 @@ func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Serv
 	ticker := time.NewTicker(bufferAutoInterval)
 	defer ticker.Stop()
 
-	window := (maxDelay + bufferAutoRetention).Seconds()
 	lastSize := int64(-1)
 
 	for {
@@ -54,6 +59,9 @@ func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Serv
 			if kbps <= 0 {
 				continue
 			}
+
+			currentMaxDelay := maxDelay()
+			window := (currentMaxDelay + bufferAutoRetention).Seconds()
 
 			bytesPerSec := float64(kbps) * 1000 / 8
 			size := int64(bytesPerSec * window)
@@ -75,7 +83,7 @@ func runBufferAutosize(ctx context.Context, buf *buffer.Buffer, src *ingest.Serv
 			logger.Info("buffer: resized",
 				"bytes", size,
 				"kbps", kbps,
-				"max_delay", maxDelay,
+				"max_delay", currentMaxDelay,
 				"retention_s", round(float64(size)/bytesPerSec, 1),
 			)
 		}

@@ -63,7 +63,8 @@ type BufferConfig struct {
 }
 
 type APIConfig struct {
-	Addr string `json:"addr"`
+	Addr  string `json:"addr"`
+	Token string `json:"token"` // обязателен, если addr не loopback (см. IsLoopbackAddr)
 }
 
 type OutputConfig struct {
@@ -90,12 +91,11 @@ type Resolved struct {
 	BufferSize    int64
 	BufferMaxSize int64
 
-	// MaxOutputDelay — наибольшая задержка среди ВСЕХ выходов конфига,
-	// включая выключенные (их могут включить через API позже — буфер должен
-	// быть готов держать нужную глубину уже сейчас).
-	MaxOutputDelay time.Duration
-
 	APIAddr string
+	// APIToken — пусто, если api.addr — loopback (аутентификация выключена).
+	// Не-loopback addr без токена — ошибка валидации, не тихий проброс наружу
+	// без защиты.
+	APIToken string
 
 	LogLevel slog.Level
 	Notify   notify.Config // нулевое значение = notify выключен
@@ -244,7 +244,10 @@ func resolve(cfg *Config) (*Resolved, error) {
 	}
 	if _, _, err := net.SplitHostPort(res.APIAddr); err != nil {
 		addf("api.addr: invalid address %q: %s", res.APIAddr, err)
+	} else if !IsLoopbackAddr(res.APIAddr) && cfg.API.Token == "" {
+		addf("api.token: required when api.addr is not localhost (%q) — anyone on the network could reach the API otherwise", res.APIAddr)
 	}
+	res.APIToken = cfg.API.Token
 
 	// log.level
 	if cfg.Log.Level == "" {
@@ -310,12 +313,6 @@ func resolve(cfg *Config) (*Resolved, error) {
 				Enabled: enabled,
 			})
 		}
-
-		// В размер буфера должна укладываться задержка любого выхода, даже
-		// выключенного сейчас — его могут включить позже через API.
-		if delay > res.MaxOutputDelay {
-			res.MaxOutputDelay = delay
-		}
 	}
 
 	if len(problems) > 0 {
@@ -323,6 +320,24 @@ func resolve(cfg *Config) (*Resolved, error) {
 	}
 
 	return res, nil
+}
+
+// IsLoopbackAddr сообщает, слушает ли addr (host:port) только локальную
+// машину. Пустой host (":8080") означает "все интерфейсы" — это НЕ loopback,
+// даже если по факту среди них есть 127.0.0.1. Хост, не являющийся ни
+// "localhost", ни разбираемым IP (например опечатка), тоже трактуется как
+// не-loopback — безопаснее потребовать токен зря, чем не потребовать его,
+// когда он на самом деле нужен.
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // CombineURLKey склеивает app-URL и ключ потока в единый RTMP URL вида

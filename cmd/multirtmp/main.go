@@ -59,6 +59,7 @@ func main() {
 
 	opts := appOptions{
 		cfgPath:               cfgPath,
+		isService:             isService,
 		overrideAddr:          addr,
 		overrideBufSize:       &bufSize,
 		overrideSourceTimeout: sourceTimeout,

@@ -24,6 +24,11 @@ const bufferStatsInterval = 2 * time.Second
 // "флаг не передан" (flag.Visit) от "передан со значением по умолчанию".
 type appOptions struct {
 	cfgPath string
+	// isService — true, если процесс запущен через SCM (svc.Run), не
+	// напрямую с консоли. Используется только для решения, стоит ли в
+	// подсказке "нет конфига" упоминать install: под уже установленной
+	// службой это упоминание было бы бессмысленным (она и так установлена).
+	isService bool
 
 	overrideAddr          *string
 	overrideBufSize       *sizeFlag
@@ -46,6 +51,9 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 			return &winservice.PermanentError{Err: fmt.Errorf("main: failed to create sample config: %w", err)}
 		}
 		logger.Info("main: no config found, created a sample — edit it and run again", "path", opts.cfgPath)
+		if !opts.isService {
+			logger.Info("main: to run multirtmp in the background as a Windows service, use: multirtmp.exe install")
+		}
 		return &winservice.PermanentError{Err: fmt.Errorf("no config at %s, sample created", opts.cfgPath)}
 	}
 
@@ -83,10 +91,6 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 
 	go buf.LogStats(appCtx, logger, bufferStatsInterval)
 
-	if cfg.BufferAuto {
-		go runBufferAutosize(appCtx, buf, ingestSrv, logger, cfg.MaxOutputDelay, cfg.BufferMaxSize)
-	}
-
 	registry := output.NewRegistry(appCtx)
 	var toStart []string
 	for _, o := range cfg.Outputs {
@@ -98,7 +102,57 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	}
 	registry.StartAll(toStart)
 
-	apiSrv := api.NewServer(cfg.APIAddr, logger, ingestSrv, buf, registry)
+	// EnsureBackup — разовая копия config.json "как настроено руками", перед
+	// тем как раздел Destinations в веб-интерфейсе начнёт его переписывать
+	// (и вместе с этим — терять `//`-комментарии, см. internal/config/doc.go).
+	// Не фатально, если не получилось: сам конфиг уже успешно загружен выше.
+	if err := config.EnsureBackup(opts.cfgPath); err != nil {
+		logger.Warn("main: failed to back up config.json", "error", err)
+	}
+	doc, err := config.LoadDoc(opts.cfgPath)
+	if err != nil {
+		return fmt.Errorf("main: failed to load config for the web UI: %w", err)
+	}
+	if len(opts.overrideOuts) > 0 {
+		// -out полностью заменяет выходы мимо config.json (см. flags.go —
+		// "debug only"): реально запущены cfg.Outputs, а не то, что лежит в
+		// файле. Buffer autosize и GET /outputs берут выходы из doc, поэтому
+		// без этой синхронизации автоподбор буфера считал бы задержку по
+		// устаревшим данным из файла, а не по факту работающим -out. url/key
+		// разделяются той же эвристикой (последний сегмент пути), что и
+		// output.MaskURL — для -out ключ отдельным полем и так никогда не
+		// вводился, это лучшее, что можно восстановить из готовой ссылки.
+		doc.Outputs = make([]config.OutputConfig, len(cfg.Outputs))
+		for i, o := range cfg.Outputs {
+			base, key := splitLastSegment(o.URL)
+			enabled := o.Enabled
+			doc.Outputs[i] = config.OutputConfig{Name: o.Name, URL: base, Key: key, Delay: o.Delay.String(), Enabled: &enabled}
+		}
+	}
+
+	lanURL := detectLANURL(cfg.APIAddr, cfg.APIToken)
+	if lanURL != "" {
+		logger.Info("main: web UI reachable from the LAN", "url", lanURL)
+	}
+
+	var firewallHint string
+	if !config.IsLoopbackAddr(cfg.APIAddr) {
+		if ok, err := winservice.FirewallRuleExists(); err != nil {
+			logger.Warn("main: failed to check Windows Firewall rule", "error", err)
+		} else if !ok {
+			port := portOf(cfg.APIAddr)
+			firewallHint = fmt.Sprintf(`New-NetFirewallRule -DisplayName "multirtmp API" -Direction Inbound -Action Allow -Protocol TCP -LocalPort %s -Profile Private`, port)
+			logger.Warn("main: Windows Firewall rule for the API port was not found, LAN/tablet access is likely blocked",
+				"port", port, "create_with", firewallHint)
+		}
+	}
+
+	apiSrv := api.NewServer(cfg.APIAddr, cfg.APIToken, api.NetworkInfo{LANURL: lanURL, FirewallHint: firewallHint},
+		logger, ingestSrv, buf, registry, opts.cfgPath, doc, notifier)
+
+	if cfg.BufferAuto {
+		go runBufferAutosize(appCtx, buf, ingestSrv, logger, apiSrv.MaxOutputDelay, cfg.BufferMaxSize)
+	}
 
 	ingestErrCh := make(chan error, 1)
 	go func() { ingestErrCh <- ingestSrv.ListenAndServe() }()
@@ -172,7 +226,6 @@ func applyFlagOverrides(cfg *config.Resolved, opts appOptions) {
 
 	if len(opts.overrideOuts) > 0 {
 		cfg.Outputs = make([]config.ResolvedOutput, 0, len(opts.overrideOuts))
-		cfg.MaxOutputDelay = 0
 		for i, o := range opts.overrideOuts {
 			cfg.Outputs = append(cfg.Outputs, config.ResolvedOutput{
 				Name:    fmt.Sprintf("out%d", i),
@@ -180,9 +233,6 @@ func applyFlagOverrides(cfg *config.Resolved, opts appOptions) {
 				Delay:   o.Delay,
 				Enabled: true,
 			})
-			if o.Delay > cfg.MaxOutputDelay {
-				cfg.MaxOutputDelay = o.Delay
-			}
 		}
 	}
 }

@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // sampleConfig — образец конфига с пояснениями. Комментарии `//` понимает
@@ -25,10 +28,15 @@ const sampleConfig = `{
     "max_size": "512MB"
   },
 
-  // Status/control HTTP API. 127.0.0.1 only, no authentication — never
-  // expose this outside the local machine.
+  // Status/control HTTP API + web UI. "addr": "127.0.0.1:8080" (default) is
+  // local-only, no token required. To reach it from another device on the
+  // LAN (e.g. a tablet), set addr to this machine's LAN IP or "0.0.0.0:8080"
+  // — "token" then becomes required (refuses to start otherwise) and must be
+  // sent as "Authorization: Bearer <token>" or "?token=<token>". A random
+  // token is already filled in below so it's ready whenever you need it.
   "api": {
-    "addr": "127.0.0.1:8080"
+    "addr": "127.0.0.1:8080",
+    "token": "__TOKEN__"
   },
 
   // Log level for the file (next to the exe, rotated 10MB x5) and stdout
@@ -82,9 +90,28 @@ func WriteSample(path string) error {
 		return fmt.Errorf("config: failed to check %s: %w", path, err)
 	}
 
-	if err := os.WriteFile(path, []byte(sampleConfig), 0o644); err != nil {
+	token, err := generateToken()
+	if err != nil {
+		return fmt.Errorf("config: failed to generate api token: %w", err)
+	}
+	content := strings.Replace(sampleConfig, "__TOKEN__", token, 1)
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("config: failed to write sample to %s: %w", path, err)
 	}
 
 	return nil
+}
+
+// generateToken делает случайный токен для api.token — 24 байта из
+// crypto/rand, base64url без паддинга даёт ровно 32 символа. Заполняется в
+// образец сразу, даже при дефолтном loopback-адресе (он не обязателен, пока
+// addr не сменили на LAN), чтобы оператору не пришлось потом возвращаться и
+// придумывать его самому.
+func generateToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
