@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type Config struct {
 	API     APIConfig      `json:"api"`
 	Log     LogConfig      `json:"log"`
 	Notify  NotifyConfig   `json:"notify"`
+	Preview PreviewConfig  `json:"preview"`
 	Outputs []OutputConfig `json:"outputs"`
 }
 
@@ -65,6 +67,17 @@ type BufferConfig struct {
 type APIConfig struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"` // обязателен, если addr не loopback (см. IsLoopbackAddr)
+}
+
+// PreviewConfig — необязательный оперативный превью-плеер в интерфейсе, под
+// блоком STATUS. Сам релей ничего не декодирует и не перепаковывает: поток в
+// превью подаётся обычным выходом из outputs (оператор сам добавляет
+// назначение вида rtmp://.../preview) на внешний MediaMTX, который отдаёт
+// его через WebRTC — сюда попадает только адрес готовой плеер-страницы.
+type PreviewConfig struct {
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url"`  // база MediaMTX WebRTC, напр. "http://127.0.0.1:8889"
+	Path    string `json:"path"` // ключ потока/путь на MediaMTX, напр. "preview"
 }
 
 type OutputConfig struct {
@@ -99,6 +112,12 @@ type Resolved struct {
 
 	LogLevel slog.Level
 	Notify   notify.Config // нулевое значение = notify выключен
+
+	// PreviewURL — уже склеенный <url>/<path> для iframe в интерфейсе; пусто,
+	// если preview.enabled=false — фронтенду не нужно ничего склеивать самому,
+	// просто проверить, что поле не пусто.
+	PreviewEnabled bool
+	PreviewURL     string
 
 	Outputs []ResolvedOutput
 }
@@ -256,6 +275,23 @@ func resolve(cfg *Config) (*Resolved, error) {
 		addf("log.level: %s", err)
 	} else {
 		res.LogLevel = lvl
+	}
+
+	// preview — необязательный WebRTC-плеер поверх стороннего MediaMTX;
+	// url/path обязательны только когда включён.
+	res.PreviewEnabled = cfg.Preview.Enabled
+	if cfg.Preview.Enabled {
+		if cfg.Preview.URL == "" {
+			addf("preview.url: required when preview.enabled is true")
+		} else if u, err := url.Parse(cfg.Preview.URL); err != nil || u.Scheme == "" || u.Host == "" {
+			addf("preview.url: invalid URL %q", cfg.Preview.URL)
+		}
+		if cfg.Preview.Path == "" {
+			addf("preview.path: required when preview.enabled is true")
+		}
+		if cfg.Preview.URL != "" && cfg.Preview.Path != "" {
+			res.PreviewURL = strings.TrimRight(cfg.Preview.URL, "/") + "/" + strings.TrimLeft(cfg.Preview.Path, "/")
+		}
 	}
 
 	// notify (telegram) — либо оба поля заданы, либо ни одного

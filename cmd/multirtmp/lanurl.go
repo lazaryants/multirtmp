@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"strings"
 
 	"multirtmp/internal/config"
 )
@@ -69,15 +68,4 @@ func firstLANIPv4() string {
 func portOf(addr string) string {
 	_, port, _ := net.SplitHostPort(addr)
 	return port
-}
-
-// splitLastSegment отделяет последний сегмент пути от остального URL —
-// та же эвристика, что и у config.CombineURLKey в обратную сторону.
-func splitLastSegment(full string) (base, seg string) {
-	full = strings.TrimRight(full, "/")
-	idx := strings.LastIndex(full, "/")
-	if idx < 0 {
-		return full, ""
-	}
-	return full[:idx], full[idx+1:]
 }

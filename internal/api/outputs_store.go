@@ -57,11 +57,20 @@ func (e *validationError) Error() string { return e.msg }
 // порядок (не наоборот) на случай сбоя записи на диск: если Save упал,
 // рантайм остаётся ровно таким же, каким был, конфиг на диске тоже не
 // тронут — ничего не расходится.
+//
+// НИКАКОГО закешированного *config.Doc между вызовами — это было причиной
+// реальной потери пользовательских данных: если между двумя HTTP-запросами
+// оператор (или что угодно ещё) поправил config.json вручную, закешированная
+// версия ничего об этом не знает, и следующая же запись (даже по совершенно
+// не связанной причине — например, обычный клик Start/Stop) стирает ручную
+// правку, потому что пишет то, что было на диске в момент СТАРТА ПРОЦЕССА, а
+// не то, что там сейчас. Каждый метод здесь перечитывает config.json заново
+// прямо перед тем, как что-то в нём менять — единственный способ гарантировать,
+// что запись не отменит правку, сделанную снаружи между вызовами.
 type outputsStore struct {
 	mu sync.Mutex
 
 	cfgPath  string
-	doc      *config.Doc
 	registry *output.Registry
 	buf      *buffer.Buffer
 	logger   *slog.Logger
@@ -70,31 +79,40 @@ type outputsStore struct {
 	maxDelay atomic.Int64 // наносекунды; см. MaxOutputDelay
 }
 
-func newOutputsStore(cfgPath string, doc *config.Doc, registry *output.Registry, buf *buffer.Buffer, logger *slog.Logger, notifier *notify.Notifier) *outputsStore {
-	s := &outputsStore{cfgPath: cfgPath, doc: doc, registry: registry, buf: buf, logger: logger, notifier: notifier}
-	s.recomputeMaxDelayLocked()
-	return s
+func newOutputsStore(cfgPath string, registry *output.Registry, buf *buffer.Buffer, logger *slog.Logger, notifier *notify.Notifier) (*outputsStore, error) {
+	s := &outputsStore{cfgPath: cfgPath, registry: registry, buf: buf, logger: logger, notifier: notifier}
+
+	doc, err := config.LoadDoc(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	s.recomputeMaxDelay(doc.Outputs)
+
+	return s, nil
 }
 
-// List отдаёт все выходы, отсортированные по имени.
-func (s *outputsStore) List() []OutputView {
-	s.mu.Lock()
-	outs := append([]config.OutputConfig{}, s.doc.Outputs...)
-	s.mu.Unlock()
+// List отдаёт все выходы, отсортированные по имени. Не под s.mu — это
+// чистое чтение (свежий LoadDoc + Registry.Snapshot), ему нечего сериализовать
+// с мутациями других методов.
+func (s *outputsStore) List() ([]OutputView, error) {
+	doc, err := config.LoadDoc(s.cfgPath)
+	if err != nil {
+		return nil, err
+	}
 
 	live := map[string]output.Status{}
 	for _, st := range s.registry.Snapshot() {
 		live[st.Name] = st
 	}
 
-	views := make([]OutputView, 0, len(outs))
-	for _, o := range outs {
+	views := make([]OutputView, 0, len(doc.Outputs))
+	for _, o := range doc.Outputs {
 		views = append(views, viewFrom(o, live[o.Name]))
 	}
 
 	sort.Slice(views, func(i, j int) bool { return views[i].Name < views[j].Name })
 
-	return views
+	return views, nil
 }
 
 func viewFrom(o config.OutputConfig, st output.Status) OutputView {
@@ -124,53 +142,90 @@ func viewFrom(o config.OutputConfig, st output.Status) OutputView {
 	return v
 }
 
+// viewFromOutputs строит OutputView из уже имеющегося на руках outputs (то,
+// что только что записали) плюс свежий снимок Registry — используется сразу
+// после Add/Update, чтобы не делать ещё один LoadDoc ради одного элемента,
+// который мы и так только что сформировали.
+func viewFromOutputs(name string, outputs []config.OutputConfig, reg *output.Registry) OutputView {
+	live := map[string]output.Status{}
+	for _, st := range reg.Snapshot() {
+		live[st.Name] = st
+	}
+	for _, o := range outputs {
+		if o.Name == name {
+			return viewFrom(o, live[name])
+		}
+	}
+	return OutputView{}
+}
+
 // Add валидирует, персистит и запускает (если Enabled) новый выход.
 func (s *outputsStore) Add(in OutputInput) (OutputView, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+
+	doc, err := config.LoadDoc(s.cfgPath)
+	if err != nil {
+		s.mu.Unlock()
+		return OutputView{}, fmt.Errorf("failed to reload config: %w", err)
+	}
 
 	existing := map[string]bool{}
-	for _, o := range s.doc.Outputs {
+	for _, o := range doc.Outputs {
 		existing[o.Name] = true
 	}
 
 	name := strings.TrimSpace(in.Name)
 	delay, err := validateOutputInput(in, name, existing)
 	if err != nil {
+		s.mu.Unlock()
 		return OutputView{}, err
 	}
 
 	entry := config.OutputConfig{Name: name, URL: strings.TrimSpace(in.URL), Key: in.Key, Delay: delay.String(), Enabled: boolPtr(in.Enabled)}
+	newOutputs := append(append([]config.OutputConfig{}, doc.Outputs...), entry)
 
-	if err := s.persistLocked(append(append([]config.OutputConfig{}, s.doc.Outputs...), entry)); err != nil {
+	if err := s.persistLocked(doc, newOutputs); err != nil {
+		s.mu.Unlock()
 		return OutputView{}, err
 	}
+	s.recomputeMaxDelay(newOutputs)
+	s.mu.Unlock()
 
 	w := output.NewWorker(name, config.CombineURLKey(entry.URL, entry.Key), delay, s.buf, s.logger, s.notifier)
 	if err := s.registry.Add(name, w, in.Enabled); err != nil {
 		return OutputView{}, fmt.Errorf("output saved to config but failed to start: %w", err)
 	}
 
-	s.recomputeMaxDelayLocked()
-
-	return s.viewLocked(name), nil
+	return viewFromOutputs(name, newOutputs, s.registry), nil
 }
 
 // Update заменяет выход oldName (переименование, если in.Name отличается).
 // Worker неизменяем после создания — правка всегда означает "остановить
 // старый, поставить новый", итоговое состояние (запущен/остановлен) после
 // сохранения равно in.Enabled, независимо от того, что было раньше.
+//
+// registry.Replace вызывается БЕЗ удержания s.mu (как и в SetEnabled) — он
+// может ждать реального завершения горутины старого воркера, а s.mu общий
+// для всех выходов; удержи его на это время, и один медленно
+// останавливающийся выход заморозил бы add/edit/delete/start/stop ЛЮБОГО
+// другого выхода.
 func (s *outputsStore) Update(oldName string, in OutputInput) (OutputView, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	idx := s.indexOfLocked(oldName)
+	doc, err := config.LoadDoc(s.cfgPath)
+	if err != nil {
+		s.mu.Unlock()
+		return OutputView{}, fmt.Errorf("failed to reload config: %w", err)
+	}
+
+	idx := indexOf(doc.Outputs, oldName)
 	if idx < 0 {
+		s.mu.Unlock()
 		return OutputView{}, &notFoundError{oldName}
 	}
 
 	existing := map[string]bool{}
-	for i, o := range s.doc.Outputs {
+	for i, o := range doc.Outputs {
 		if i != idx {
 			existing[o.Name] = true
 		}
@@ -179,77 +234,84 @@ func (s *outputsStore) Update(oldName string, in OutputInput) (OutputView, error
 	name := strings.TrimSpace(in.Name)
 	delay, err := validateOutputInput(in, name, existing)
 	if err != nil {
+		s.mu.Unlock()
 		return OutputView{}, err
 	}
 
 	entry := config.OutputConfig{Name: name, URL: strings.TrimSpace(in.URL), Key: in.Key, Delay: delay.String(), Enabled: boolPtr(in.Enabled)}
 
-	newOutputs := append([]config.OutputConfig{}, s.doc.Outputs...)
+	newOutputs := append([]config.OutputConfig{}, doc.Outputs...)
 	newOutputs[idx] = entry
-	if err := s.persistLocked(newOutputs); err != nil {
+	if err := s.persistLocked(doc, newOutputs); err != nil {
+		s.mu.Unlock()
 		return OutputView{}, err
 	}
+	s.recomputeMaxDelay(newOutputs)
+	s.mu.Unlock()
 
 	w := output.NewWorker(name, config.CombineURLKey(entry.URL, entry.Key), delay, s.buf, s.logger, s.notifier)
 	if err := s.registry.Replace(oldName, name, w, in.Enabled); err != nil {
 		return OutputView{}, fmt.Errorf("output saved to config but failed to restart: %w", err)
 	}
 
-	s.recomputeMaxDelayLocked()
-
-	return s.viewLocked(name), nil
+	return viewFromOutputs(name, newOutputs, s.registry), nil
 }
 
-// Delete останавливает (если запущен) и убирает выход name.
+// Delete останавливает (если запущен) и убирает выход name. registry.Remove
+// тоже вызывается вне s.mu — см. комментарий у Update.
 func (s *outputsStore) Delete(name string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
-	idx := s.indexOfLocked(name)
+	doc, err := config.LoadDoc(s.cfgPath)
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("failed to reload config: %w", err)
+	}
+
+	idx := indexOf(doc.Outputs, name)
 	if idx < 0 {
+		s.mu.Unlock()
 		return &notFoundError{name}
 	}
 
-	newOutputs := append(append([]config.OutputConfig{}, s.doc.Outputs[:idx]...), s.doc.Outputs[idx+1:]...)
-	if err := s.persistLocked(newOutputs); err != nil {
+	newOutputs := append(append([]config.OutputConfig{}, doc.Outputs[:idx]...), doc.Outputs[idx+1:]...)
+	if err := s.persistLocked(doc, newOutputs); err != nil {
+		s.mu.Unlock()
 		return err
 	}
+	s.recomputeMaxDelay(newOutputs)
+	s.mu.Unlock()
 
 	if err := s.registry.Remove(name); err != nil {
 		return fmt.Errorf("output removed from config but failed to stop: %w", err)
 	}
 
-	s.recomputeMaxDelayLocked()
-
 	return nil
 }
 
-// SetEnabled — то, что теперь стоит за POST /outputs/{name}/start|stop:
-// решение оператора персистится в config.json (enabled), а не только меняет
-// рантайм — иначе после рестарта службы или нового publish от vMix (который
-// пересобирает буфер, но не троганные им выходы) всё возвращалось бы к
-// enabled из файла, будто оператор ничего не нажимал. Автозапуск при
+// SetEnabled — то, что стоит за POST /outputs/{name}/start|stop: решение
+// оператора персистится в config.json (enabled), а не только меняет рантайм
+// — иначе после рестарта службы или нового publish от vMix всё возвращалось
+// бы к enabled из файла, будто оператор ничего не нажимал. Автозапуск при
 // появлении источника по-прежнему только для enabled:true — это решается
 // самим фактом персиста, отдельной логики не требуется.
 //
-// registry.Start/Stop вызываются БЕЗ удержания s.mu: Stop может занять
-// несколько секунд (ждёт реального завершения горутины воркера — см.
-// Registry.Stop), а s.mu — это лок всего стора, общий для всех выходов;
-// удержи его на это время, и один медленный Stop заморозил бы
-// старт/стоп/добавление/правку/удаление ЛЮБОГО другого выхода — то самое
-// "один медленный выход не влияет на остальные" из CLAUDE.md, просто на
-// уровне API, а не пейсинга. Сериализация конкретно этого выхода — забота
-// Registry (per-entry opMu), не стора. Отдельно: если registry-вызов
-// вернёт ConflictError (уже запущен/уже остановлен), config.json остаётся
-// нетронутым — нет смысла тратить запись на команду, которая не изменит
-// состояние.
+// registry.Start/Stop вызываются БЕЗ удержания s.mu — см. Update. Отдельно:
+// если registry-вызов вернёт ConflictError (уже запущен/уже остановлен),
+// config.json не читается и не трогается вовсе — нет смысла тратить чтение
+// и запись на команду, которая не изменит состояние.
 func (s *outputsStore) SetEnabled(name string, enabled bool) (OutputView, error) {
-	s.mu.Lock()
-	if s.indexOfLocked(name) < 0 {
-		s.mu.Unlock()
-		return OutputView{}, &notFoundError{name}
+	// Быстрая предварительная проверка существования — не под локом, просто
+	// чтобы не запускать registry-операцию для явно несуществующего имени;
+	// не обязана быть безупречно консистентной (реальная проверка — ниже,
+	// под локом, прямо перед записью), поэтому ошибку самого LoadDoc здесь
+	// просто игнорируем и даём дойти до registry.Start/Stop, у которого есть
+	// собственная проверка "нет такого выхода".
+	if doc, err := config.LoadDoc(s.cfgPath); err == nil {
+		if indexOf(doc.Outputs, name) < 0 {
+			return OutputView{}, &notFoundError{name}
+		}
 	}
-	s.mu.Unlock()
 
 	var opErr error
 	if enabled {
@@ -264,32 +326,43 @@ func (s *outputsStore) SetEnabled(name string, enabled bool) (OutputView, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Перепроверка: пока registry.Start/Stop выполнялся без s.mu, конкурентный
-	// Delete мог убрать этот выход из конфига совсем.
-	idx := s.indexOfLocked(name)
+	// Перечитываем СЕЙЧАС, а не полагаемся на то, что видели в
+	// предварительной проверке выше — пока registry.Start/Stop выполнялся,
+	// конфиг на диске мог измениться (в т.ч. и этот самый выход мог пропасть
+	// через конкурентный Delete).
+	doc, err := config.LoadDoc(s.cfgPath)
+	if err != nil {
+		return OutputView{}, fmt.Errorf("output %s but config could not be reloaded to save it: %w",
+			map[bool]string{true: "started", false: "stopped"}[enabled], err)
+	}
+	idx := indexOf(doc.Outputs, name)
 	if idx < 0 {
 		return OutputView{}, &notFoundError{name}
 	}
 
-	newOutputs := append([]config.OutputConfig{}, s.doc.Outputs...)
+	newOutputs := append([]config.OutputConfig{}, doc.Outputs...)
 	newOutputs[idx].Enabled = boolPtr(enabled)
-	if err := s.persistLocked(newOutputs); err != nil {
+	if err := s.persistLocked(doc, newOutputs); err != nil {
 		return OutputView{}, err
 	}
+	s.recomputeMaxDelay(newOutputs)
 
-	return s.viewLocked(name), nil
+	return viewFromOutputs(name, newOutputs, s.registry), nil
 }
 
-// MaxOutputDelay — наибольшая задержка среди всех выходов прямо сейчас
-// (включая выключенные), для автоподбора размера буфера (см.
-// cmd/multirtmp/bufferauto.go) — читается на каждом тике автоподбора, поэтому
-// атомик, а не под mu.
+// MaxOutputDelay — наибольшая задержка среди всех выходов, какой она была в
+// момент последней мутации (Add/Update/Delete/SetEnabled) или старта
+// процесса — для автоподбора размера буфера (см. cmd/multirtmp/bufferauto.go),
+// читается на каждом тике автоподбора, поэтому атомик. Не пересчитывается на
+// правки config.json вручную мимо API между мутациями — тот же компромисс,
+// что и у остального автоподбора буфера: он реагирует на то, что происходит
+// через API, а не полит файл на диске постоянно.
 func (s *outputsStore) MaxOutputDelay() time.Duration {
 	return time.Duration(s.maxDelay.Load())
 }
 
-func (s *outputsStore) indexOfLocked(name string) int {
-	for i, o := range s.doc.Outputs {
+func indexOf(outputs []config.OutputConfig, name string) int {
+	for i, o := range outputs {
 		if o.Name == name {
 			return i
 		}
@@ -297,37 +370,24 @@ func (s *outputsStore) indexOfLocked(name string) int {
 	return -1
 }
 
-func (s *outputsStore) persistLocked(outputs []config.OutputConfig) error {
-	doc := *s.doc
+// persistLocked дописывает outputs в doc (уже свежепрочитанный вызывающим) и
+// сохраняет. Вызывающий обязан держать s.mu на всё время между LoadDoc и
+// этим вызовом — иначе именно это окно и открывает гонку "прочитали одно,
+// записали поверх другого", то есть саму дыру, которую эта переработка
+// закрывает.
+func (s *outputsStore) persistLocked(doc *config.Doc, outputs []config.OutputConfig) error {
 	doc.Outputs = outputs
-	if err := doc.Save(s.cfgPath); err != nil {
-		return err
-	}
-	s.doc = &doc
-	return nil
+	return doc.Save(s.cfgPath)
 }
 
-func (s *outputsStore) recomputeMaxDelayLocked() {
+func (s *outputsStore) recomputeMaxDelay(outputs []config.OutputConfig) {
 	var max time.Duration
-	for _, o := range s.doc.Outputs {
+	for _, o := range outputs {
 		if d := parseDelayOrZero(o.Delay); d > max {
 			max = d
 		}
 	}
 	s.maxDelay.Store(int64(max))
-}
-
-func (s *outputsStore) viewLocked(name string) OutputView {
-	for _, o := range s.doc.Outputs {
-		if o.Name == name {
-			live := map[string]output.Status{}
-			for _, st := range s.registry.Snapshot() {
-				live[st.Name] = st
-			}
-			return viewFrom(o, live[name])
-		}
-	}
-	return OutputView{}
 }
 
 // validateOutputInput проверяет name/url/key/delay в in. name — уже

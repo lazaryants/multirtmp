@@ -9,7 +9,12 @@ import (
 )
 
 func (s *Server) handleOutputsList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.outputs.List())
+	views, err := s.outputs.List()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 func (s *Server) handleOutputsCreate(w http.ResponseWriter, r *http.Request) {

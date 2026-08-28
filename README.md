@@ -46,3 +46,30 @@ server itself.
 `config.json`, next to the executable. A commented sample is created
 automatically the first time you run the exe without one — see the comments
 in the generated file for what each field does and its default.
+
+## Optional live preview
+
+The web interface can embed a live preview player below the status section.
+multirtmp itself never decodes or re-packages video for this — it's built
+from two things that already exist:
+
+1. A second, separate program — [MediaMTX](https://github.com/bluenviron/mediamtx)
+   — installed alongside multirtmp on the same machine and registered as its
+   own Windows service (`mediamtx.exe` has its own `--help`/install options;
+   it's independent of multirtmp's own service). It listens for an RTMP
+   publish and serves it back out over WebRTC, among other protocols.
+2. One more entry in multirtmp's own `outputs` — same as any other
+   destination, just pointed at MediaMTX instead of YouTube or a corp
+   server, e.g. `rtmp://127.0.0.1:19350/preview` with whatever delay you
+   want the preview to run at.
+
+Point `preview.url`/`preview.path` in `config.json` at that MediaMTX's WebRTC
+address and the same stream path, set `preview.enabled: true`, and the web UI
+embeds it automatically. There's no special coupling beyond that — multirtmp
+just forwards RTMP tags to MediaMTX exactly like it forwards them to any other
+destination; MediaMTX does the actual decoding for the browser player.
+
+Preview is entirely optional. On weaker hardware, or on a site where nobody
+needs to watch a preview in the browser, leave `preview.enabled: false` (the
+default) — MediaMTX doesn't need to be installed or running at all in that
+case, and no preview output needs to exist in `outputs`.

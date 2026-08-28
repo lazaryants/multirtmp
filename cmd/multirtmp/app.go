@@ -106,28 +106,11 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	// тем как раздел Destinations в веб-интерфейсе начнёт его переписывать
 	// (и вместе с этим — терять `//`-комментарии, см. internal/config/doc.go).
 	// Не фатально, если не получилось: сам конфиг уже успешно загружен выше.
+	// Обязательно ДО того, как что-либо получает возможность вызвать
+	// api.NewServer/outputsStore — первая же запись через API не должна
+	// оказаться раньше первого бэкапа.
 	if err := config.EnsureBackup(opts.cfgPath); err != nil {
 		logger.Warn("main: failed to back up config.json", "error", err)
-	}
-	doc, err := config.LoadDoc(opts.cfgPath)
-	if err != nil {
-		return fmt.Errorf("main: failed to load config for the web UI: %w", err)
-	}
-	if len(opts.overrideOuts) > 0 {
-		// -out полностью заменяет выходы мимо config.json (см. flags.go —
-		// "debug only"): реально запущены cfg.Outputs, а не то, что лежит в
-		// файле. Buffer autosize и GET /outputs берут выходы из doc, поэтому
-		// без этой синхронизации автоподбор буфера считал бы задержку по
-		// устаревшим данным из файла, а не по факту работающим -out. url/key
-		// разделяются той же эвристикой (последний сегмент пути), что и
-		// output.MaskURL — для -out ключ отдельным полем и так никогда не
-		// вводился, это лучшее, что можно восстановить из готовой ссылки.
-		doc.Outputs = make([]config.OutputConfig, len(cfg.Outputs))
-		for i, o := range cfg.Outputs {
-			base, key := splitLastSegment(o.URL)
-			enabled := o.Enabled
-			doc.Outputs[i] = config.OutputConfig{Name: o.Name, URL: base, Key: key, Delay: o.Delay.String(), Enabled: &enabled}
-		}
 	}
 
 	lanURL := detectLANURL(cfg.APIAddr, cfg.APIToken)
@@ -147,8 +130,19 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 		}
 	}
 
-	apiSrv := api.NewServer(cfg.APIAddr, cfg.APIToken, api.NetworkInfo{LANURL: lanURL, FirewallHint: firewallHint},
-		logger, ingestSrv, buf, registry, opts.cfgPath, doc, notifier)
+	// Примечание про -out (debug-флаг, см. flags.go): он подменяет выходы
+	// мимо config.json, но outputsStore теперь всегда читает выходы с диска
+	// заново перед каждой операцией (см. internal/api/outputs_store.go —
+	// это то, что и чинит текущий баг с потерей секций конфига) и понятия не
+	// имеет о -out. При активном -out буфер-автоподбор и GET /outputs будут
+	// смотреть на реальный файл, а не на то, что подменил -out — известный,
+	// осознанно принятый нюанс debug-режима, не для продакшна.
+	apiSrv, err := api.NewServer(cfg.APIAddr, cfg.APIToken, api.NetworkInfo{LANURL: lanURL, FirewallHint: firewallHint},
+		api.PreviewInfo{Enabled: cfg.PreviewEnabled, URL: cfg.PreviewURL},
+		logger, ingestSrv, buf, registry, opts.cfgPath, notifier)
+	if err != nil {
+		return fmt.Errorf("main: failed to start api server: %w", err)
+	}
 
 	if cfg.BufferAuto {
 		go runBufferAutosize(appCtx, buf, ingestSrv, logger, apiSrv.MaxOutputDelay, cfg.BufferMaxSize)

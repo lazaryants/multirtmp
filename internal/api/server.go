@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"multirtmp/internal/buffer"
-	"multirtmp/internal/config"
 	"multirtmp/internal/ingest"
 	"multirtmp/internal/notify"
 	"multirtmp/internal/output"
@@ -35,11 +34,20 @@ type NetworkInfo struct {
 	FirewallHint string
 }
 
+// PreviewInfo — настройки необязательного WebRTC-превью в интерфейсе (см.
+// config.PreviewConfig). URL уже склеен (<preview.url>/<preview.path>) —
+// фронтенду достаточно проверить Enabled и подставить URL в iframe как есть.
+type PreviewInfo struct {
+	Enabled bool
+	URL     string
+}
+
 // Server — HTTP API + статика поверх ingest/buffer/output.
 type Server struct {
 	addr    string
 	token   string
 	network NetworkInfo
+	preview PreviewInfo
 	logger  *slog.Logger
 
 	ingest   *ingest.Server
@@ -52,20 +60,27 @@ type Server struct {
 
 // NewServer создаёт API-сервер, слушающий addr (например, "127.0.0.1:8080").
 // token — из config.Resolved.APIToken; пусто на loopback-адресах (тогда
-// аутентификация выключена целиком, поведение как раньше). doc/cfgPath —
-// текущий config.json для персиста правок из раздела Destinations (см.
-// outputs_store.go); notifier — для алертов down/up у выходов, добавленных
-// через UI, наравне с выходами из стартового конфига.
-func NewServer(addr, token string, network NetworkInfo, logger *slog.Logger, ingestSrv *ingest.Server, buf *buffer.Buffer, registry *output.Registry, cfgPath string, doc *config.Doc, notifier *notify.Notifier) *Server {
+// аутентификация выключена целиком, поведение как раньше). cfgPath —
+// config.json для персиста правок из раздела Destinations (см.
+// outputs_store.go) — каждая мутация перечитывает его заново с диска, ничего
+// не кешируется между запросами; notifier — для алертов down/up у выходов,
+// добавленных через UI, наравне с выходами из стартового конфига.
+func NewServer(addr, token string, network NetworkInfo, preview PreviewInfo, logger *slog.Logger, ingestSrv *ingest.Server, buf *buffer.Buffer, registry *output.Registry, cfgPath string, notifier *notify.Notifier) (*Server, error) {
+	outputs, err := newOutputsStore(cfgPath, registry, buf, logger, notifier)
+	if err != nil {
+		return nil, fmt.Errorf("api: failed to initialize outputs store: %w", err)
+	}
+
 	s := &Server{
 		addr:     addr,
 		token:    token,
 		network:  network,
+		preview:  preview,
 		logger:   logger,
 		ingest:   ingestSrv,
 		buf:      buf,
 		registry: registry,
-		outputs:  newOutputsStore(cfgPath, doc, registry, buf, logger, notifier),
+		outputs:  outputs,
 	}
 
 	mux := http.NewServeMux()
@@ -83,7 +98,7 @@ func NewServer(addr, token string, network NetworkInfo, logger *slog.Logger, ing
 		Handler: s.requireToken(mux),
 	}
 
-	return s
+	return s, nil
 }
 
 // MaxOutputDelay — см. outputsStore.MaxOutputDelay; проброшено наружу для

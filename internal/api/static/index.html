@@ -116,6 +116,21 @@
   .dot.red { background: var(--red); }
   .dot.grey { background: var(--grey); }
 
+  .preview-wrap {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    max-width: 720px;
+    aspect-ratio: 16 / 9;
+  }
+  #preview-frame {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+  }
+
   .outputs-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -270,6 +285,10 @@
 </header>
 
 <div id="auth-error">Unauthorized — reopen this page using a valid link (with <code>?token=...</code>), or ask the operator for a fresh one.</div>
+<div id="js-error-banner" class="banner" style="display:none">
+  A script error occurred — the interface may be stuck or out of date. Reload the page; if it keeps happening, check the browser console and report it.
+  <span class="cmd" id="js-error-detail"></span>
+</div>
 
 <div id="firewall-banner" class="banner warn" style="display:none">
   ⚠ Windows Firewall rule for the API port was not found on the server — devices on the LAN (e.g. a tablet) likely cannot connect.
@@ -299,6 +318,13 @@
   <div class="outputs-grid" id="outputs-grid"></div>
 </section>
 
+<section id="preview-section" style="display:none">
+  <h2>Preview</h2>
+  <div class="preview-wrap">
+    <iframe id="preview-frame" allow="autoplay" allowfullscreen title="Live preview"></iframe>
+  </div>
+</section>
+
 <section>
   <h2>
     Destinations
@@ -312,6 +338,26 @@
 </section>
 
 <script>
+// Registered outside the main IIFE, before anything else runs, so it's live
+// even if the main script throws during its own top-level setup — an
+// uncaught exception anywhere past this point would otherwise fail
+// completely silently (no console visible on a tablet, nothing on screen)
+// and look identical to "the button just doesn't do anything".
+window.addEventListener('error', function (e) {
+  var banner = document.getElementById('js-error-banner');
+  var detail = document.getElementById('js-error-detail');
+  if (!banner || !detail) return;
+  banner.style.display = '';
+  detail.textContent = (e.message || 'script error') + ' (' + (e.filename || '') + ':' + (e.lineno || '?') + ')';
+});
+window.addEventListener('unhandledrejection', function (e) {
+  var banner = document.getElementById('js-error-banner');
+  var detail = document.getElementById('js-error-detail');
+  if (!banner || !detail) return;
+  banner.style.display = '';
+  detail.textContent = 'unhandled promise rejection: ' + (e.reason && e.reason.message ? e.reason.message : e.reason);
+});
+
 (function () {
   'use strict';
 
@@ -462,6 +508,7 @@
 
     renderOutputCards(s.outputs);
     renderNetwork(s.network);
+    renderPreview(s.preview);
 
     liveByName = {};
     s.outputs.forEach(function (o) { liveByName[o.name] = o; });
@@ -514,29 +561,64 @@
     btn.title = lanURL ? '' : 'api.addr is localhost-only — set it to a LAN address to enable this';
   }
 
-  async function fetchStatus() {
-    try {
-      var res = await authFetch('/status');
-      if (res.status === 401) { showAuthError(); return; }
-      if (!res.ok) return;
-      hideAuthError();
-      renderStatus(await res.json());
-    } catch (e) {
-      // network hiccup — next tick retries
+  // preview.{enabled,url} come from config.json and don't change without a
+  // restart — the iframe src is set once (previewSrc tracks what's already
+  // loaded) rather than on every 1s tick, so the embedded player doesn't
+  // reload itself every second.
+  var previewSrc = '';
+
+  function renderPreview(preview) {
+    var section = document.getElementById('preview-section');
+    if (!preview.enabled || !preview.url) {
+      section.style.display = 'none';
+      previewSrc = '';
+      return;
     }
+    section.style.display = '';
+    if (preview.url !== previewSrc) {
+      document.getElementById('preview-frame').src = preview.url;
+      previewSrc = preview.url;
+    }
+  }
+
+  async function fetchStatus() {
+    // Only the network round-trip is expected to fail sometimes (offline,
+    // server restarting) — that's a quiet retry-next-tick. A throw inside
+    // renderStatus itself is a real bug and must NOT be swallowed here: it's
+    // deliberately left to propagate as an unhandled rejection (fetchStatus
+    // is called without .catch at the call sites below), which the
+    // window.addEventListener('unhandledrejection', ...) handler above
+    // turns into a visible banner instead of a silent, undebuggable "nothing
+    // happens" — that ambiguity is exactly what made the last round of UI
+    // bugs (dead Add button, missing spinners) hard to tell apart from a
+    // network hiccup.
+    var res;
+    try {
+      res = await authFetch('/status');
+    } catch (e) {
+      return;
+    }
+    if (res.status === 401) { showAuthError(); return; }
+    if (!res.ok) return;
+    hideAuthError();
+    renderStatus(await res.json());
   }
 
   // ---- destinations ------------------------------------------------------
 
   async function refreshOutputsConfig() {
+    // Same split as fetchStatus: only the network call is a quiet retry.
+    var res;
     try {
-      var res = await authFetch('/outputs');
-      if (res.status === 401) { showAuthError(); return; }
-      if (!res.ok) return;
-      hideAuthError();
-      outputsConfig = await res.json();
-      renderDestinations();
-    } catch (e) {}
+      res = await authFetch('/outputs');
+    } catch (e) {
+      return;
+    }
+    if (res.status === 401) { showAuthError(); return; }
+    if (!res.ok) return;
+    hideAuthError();
+    outputsConfig = await res.json();
+    renderDestinations();
   }
 
   function renderDestinations() {

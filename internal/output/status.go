@@ -36,6 +36,16 @@ const (
 	reconnectRateThreshold = 5
 )
 
+// lastErrorClearAfter — сколько стрим должен непрерывно продержаться в
+// StateStreaming, прежде чем last_error сотрётся сам. Без этого last_error
+// от давно отжившего сбоя (например, разовый обрыв назначения) висел бы в
+// /status и в интерфейсе бесконечно — оператор видел бы красный текст об
+// ошибке, которой уже час как нет, хотя выход стабильно стримит. Счётчик
+// reconnects при этом НЕ сбрасывается — это накопительная метрика за весь
+// жизненный цикл выхода, отдельно от того, актуальна ли последняя ошибка
+// прямо сейчас.
+const lastErrorClearAfter = 60 * time.Second
+
 // Status — снимок состояния одного выхода.
 type Status struct {
 	Name       string  `json:"name"`
@@ -238,6 +248,10 @@ func (s *status) run(ctx context.Context, logger *slog.Logger, interval time.Dur
 			s.lastKbps = kbps
 			if haveLag {
 				s.lastLagS = lagS
+			}
+			if s.state == StateStreaming && !s.streamStartedAt.IsZero() &&
+				s.lastError != "" && time.Since(s.streamStartedAt) >= lastErrorClearAfter {
+				s.lastError = ""
 			}
 			name := s.name
 			s.mu.Unlock()

@@ -11,6 +11,7 @@ import (
 type statusResponse struct {
 	Build   buildJSON        `json:"build"`
 	Network networkJSON      `json:"network"`
+	Preview previewJSON      `json:"preview"`
 	Source  sourceStatusJSON `json:"source"`
 	Buffer  bufferStatusJSON `json:"buffer"`
 	Outputs []output.Status  `json:"outputs"`
@@ -19,6 +20,11 @@ type statusResponse struct {
 type networkJSON struct {
 	LANURL       string `json:"lan_url,omitempty"`
 	FirewallHint string `json:"firewall_hint,omitempty"`
+}
+
+type previewJSON struct {
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url,omitempty"`
 }
 
 type buildJSON struct {
@@ -70,6 +76,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{
 		Build:   buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
 		Network: networkJSON{LANURL: s.network.LANURL, FirewallHint: s.network.FirewallHint},
+		Preview: previewJSON{Enabled: s.preview.Enabled, URL: s.preview.URL},
 		Source:  sj,
 		Buffer: bufferStatusJSON{
 			Bytes:     bufStats.Bytes,

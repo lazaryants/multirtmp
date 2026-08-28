@@ -55,6 +55,22 @@ const sampleConfig = `{
     "telegram_chat_id": ""
   },
 
+  // Optional live preview player, embedded in the web UI below the status
+  // section. multirtmp itself never decodes or re-packages anything for
+  // this — the preview stream is just another entry in "outputs" below
+  // (e.g. pointed at "rtmp://127.0.0.1:19350/preview"), fed to a separate
+  // MediaMTX instance running alongside multirtmp, which serves it back out
+  // over WebRTC. "url" is that MediaMTX's WebRTC address, "path" is the
+  // stream's path/key on it — the player embeds "<url>/<path>". Leave
+  // "enabled": false (default) to skip this section of the UI entirely —
+  // on weaker hardware, or when a preview simply isn't needed on site,
+  // there's no need to run MediaMTX or add the preview output at all.
+  "preview": {
+    "enabled": false,
+    "url": "http://127.0.0.1:8889",
+    "path": "preview"
+  },
+
   // Outputs. url — without the stream key (the app part only, e.g.
   // "rtmp://a.rtmp.youtube.com/live2"); key — the stream key as its own
   // field, so it never appears in full in the logs. delay — this output's
