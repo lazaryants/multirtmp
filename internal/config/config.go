@@ -130,6 +130,11 @@ type Resolved struct {
 	// просто проверить, что поле не пусто.
 	PreviewEnabled bool
 	PreviewURL     string
+	// PreviewBaseURL — preview.url как есть (адрес WebRTC-сервера MediaMTX,
+	// напр. "http://127.0.0.1:8889"): куда проксирует /preview/, и откуда
+	// берётся порт для MTX_WEBRTCADDRESS. PreviewPath — preview.path.
+	PreviewBaseURL string
+	PreviewPath    string
 	// PreviewMediaMTXExe — preview.mediamtx_exe как есть (пусто — путь по
 	// умолчанию; разрешается относительно папки exe в cmd/multirtmp).
 	PreviewMediaMTXExe string
@@ -319,6 +324,8 @@ func resolve(cfg *Config) (*Resolved, error) {
 			res.PreviewURL = strings.TrimRight(cfg.Preview.URL, "/") + "/" + strings.TrimLeft(cfg.Preview.Path, "/")
 		}
 		res.PreviewMediaMTXExe = cfg.Preview.MediaMTXExe
+		res.PreviewBaseURL = strings.TrimRight(cfg.Preview.URL, "/")
+		res.PreviewPath = strings.Trim(cfg.Preview.Path, "/")
 	}
 
 	// notify (telegram) — либо оба поля заданы, либо ни одного

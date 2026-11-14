@@ -4,7 +4,10 @@
 # Based on the stock mediamtx.yml of MediaMTX v1.21.3, with these changes:
 #   - RTMP listens on 127.0.0.1:19350 only (multirtmp's preview output
 #     publishes here);
-#   - WebRTC stays on (the browser player);
+#   - WebRTC stays on (the browser player). Its HTTP signaling listens on
+#     127.0.0.1 only: other devices reach it through multirtmp's /preview/
+#     proxy, under the same token as the web interface. Only the UDP media
+#     port (8189) is reachable from the network;
 #   - RTSP, HLS, SRT and MoQ are off;
 #   - publishing is allowed only from this computer (127.0.0.1 / ::1),
 #     reading from anywhere;
@@ -399,7 +402,7 @@ hlsCDNSecret: ""
 # Enable the WebRTC server, which allows to publish and read streams with the WebRTC protocol.
 webrtc: true
 # Address of the WebRTC TCP/HTTP listener.
-webrtcAddress: :8889
+webrtcAddress: 127.0.0.1:8889
 # Enable HTTPS.
 # This covers only the WebRTC handshake, while WebRTC streams
 # are always encrypted with a key that is exchanged during the WebRTC handshake.

@@ -155,3 +155,29 @@ func TestBuildLANURLs(t *testing.T) {
 		})
 	}
 }
+
+// Интерфейсы для ICE-кандидатов MediaMTX на машине из отчёта: Ethernet (там
+// шлюз) и loopback, без VPN Karing. Выключенный адаптер не попадает.
+func TestWebRTCInterfacesVPNMachine(t *testing.T) {
+	adapters := []adapterInfo{
+		{name: "Karing TUN Network Adapter", up: true, ifType: 53, addrs: []net.IPNet{ipnet("10.20.0.1/30")}},
+		{name: "Ethernet", up: true, ifType: 6,
+			addrs:    []net.IPNet{ipnet("192.168.131.12/24"), ipnet("192.168.10.12/24"), ipnet("192.168.1.12/24")},
+			gateways: []net.IP{net.ParseIP("192.168.1.1")}},
+		{name: "Wi-Fi", up: false, ifType: 71, addrs: []net.IPNet{ipnet("10.0.5.40/24")}, gateways: []net.IP{net.ParseIP("10.0.5.1")}},
+		{name: "Loopback Pseudo-Interface 1", up: true, ifType: windows.IF_TYPE_SOFTWARE_LOOPBACK, addrs: []net.IPNet{ipnet("127.0.0.1/8")}},
+	}
+
+	got := webrtcInterfaces(adapters)
+	want := []string{"Ethernet", "Loopback Pseudo-Interface 1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	// Без сети вообще (кабель выдернут) — остаётся loopback: превью на самом
+	// сервере работает.
+	got = webrtcInterfaces(adapters[3:])
+	if !reflect.DeepEqual(got, []string{"Loopback Pseudo-Interface 1"}) {
+		t.Fatalf("no LAN: got %v", got)
+	}
+}

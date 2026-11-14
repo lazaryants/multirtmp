@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"multirtmp/internal/api"
@@ -136,17 +137,27 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 		logger.Info("main: web UI reachable from the LAN", "url", u)
 	}
 
-	var firewallHint string
-	if !config.IsLoopbackAddr(cfg.APIAddr) {
-		if ok, err := winservice.FirewallRuleExists(); err != nil {
-			logger.Warn("main: failed to check Windows Firewall rule", "error", err)
+	// Правила брандмауэра проверяются на каждом старте (не только при install):
+	// доступ по LAN или превью могли включить позже. Чего не хватает — Warn в
+	// лог и одна готовая строка PowerShell в баннер интерфейса.
+	var missingRules []string
+	checkRule := func(name, protocol, port, what string) {
+		if ok, err := winservice.FirewallRuleExists(name); err != nil {
+			logger.Warn("main: failed to check Windows Firewall rule", "rule", name, "error", err)
 		} else if !ok {
-			port := portOf(cfg.APIAddr)
-			firewallHint = fmt.Sprintf(`New-NetFirewallRule -DisplayName "multirtmp API" -Direction Inbound -Action Allow -Protocol TCP -LocalPort %s -Profile Private`, port)
-			logger.Warn("main: Windows Firewall rule for the API port was not found, LAN/tablet access is likely blocked",
-				"port", port, "create_with", firewallHint)
+			cmd := winservice.FirewallRuleCommand(name, protocol, port)
+			missingRules = append(missingRules, cmd)
+			logger.Warn("main: Windows Firewall rule not found, "+what+" from the LAN is likely blocked",
+				"rule", name, "port", port+"/"+protocol, "create_with", cmd)
 		}
 	}
+	if !config.IsLoopbackAddr(cfg.APIAddr) {
+		checkRule(winservice.APIFirewallRule, "TCP", portOf(cfg.APIAddr), "the web interface")
+		if cfg.PreviewEnabled {
+			checkRule(winservice.PreviewFirewallRule, "UDP", previewUDPPort, "the preview")
+		}
+	}
+	firewallHint := strings.Join(missingRules, "; ")
 
 	// Примечание про -out (debug-флаг, см. flags.go): он подменяет выходы
 	// мимо config.json, но outputsStore теперь всегда читает выходы с диска
@@ -159,10 +170,16 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	// Ссылки для планшета в интерфейсе вычисляются заново на каждый клик
 	// "Show link for tablet" (адрес машины меняется через DHCP); строка в
 	// логе выше — снимок на момент старта.
-	previewInfo := api.PreviewInfo{Enabled: cfg.PreviewEnabled, URL: cfg.PreviewURL}
+	// Плеер превью — через прокси multirtmp (/preview/...), а не напрямую с
+	// MediaMTX: тот же хост, что и у страницы, и тот же токен.
+	previewInfo := api.PreviewInfo{Enabled: cfg.PreviewEnabled}
+	if cfg.PreviewEnabled {
+		previewInfo.URL = "/preview/" + cfg.PreviewPath + "/"
+		previewInfo.Target = cfg.PreviewBaseURL
+	}
 	var mtx *mediamtx.Supervisor
 	if cfg.PreviewEnabled {
-		mtx = newMediaMTXSupervisor(cfg.PreviewMediaMTXExe, logger)
+		mtx = newMediaMTXSupervisor(cfg.PreviewMediaMTXExe, cfg.PreviewBaseURL, logger)
 		previewInfo.MediaMTX = mtx.Status
 	}
 

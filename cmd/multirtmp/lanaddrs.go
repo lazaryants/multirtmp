@@ -44,7 +44,23 @@ const minTunnelPrefix = 30
 // у одного адаптера нет шлюза или ни один адрес не попал в подсеть шлюза:
 // тогда угадывать не из чего, и оператор выбирает сам.
 func rankLANIPs(adapters []adapterInfo) []string {
-	var primary, rest []string
+	var ips []string
+	for _, c := range rankLAN(adapters) {
+		ips = append(ips, c.ip)
+	}
+	return ips
+}
+
+// lanCandidate — выбранный адрес и адаптер, которому он принадлежит.
+type lanCandidate struct {
+	ip      string
+	adapter string
+}
+
+// rankLAN — логика rankLANIPs, но с именами адаптеров (нужны для списка
+// интерфейсов WebRTC в MediaMTX, см. webrtcInterfaces).
+func rankLAN(adapters []adapterInfo) []lanCandidate {
+	var primary, rest []lanCandidate
 	seen := map[string]bool{}
 
 	for _, a := range adapters {
@@ -72,9 +88,9 @@ func rankLANIPs(adapters []adapterInfo) []string {
 			seen[s] = true
 
 			if subnetHasGateway(n, a.gateways) {
-				primary = append(primary, s)
+				primary = append(primary, lanCandidate{s, a.name})
 			} else {
-				rest = append(rest, s)
+				rest = append(rest, lanCandidate{s, a.name})
 			}
 		}
 	}
@@ -136,4 +152,33 @@ func readAdapters() ([]adapterInfo, error) {
 	}
 
 	return out, nil
+}
+
+// webrtcInterfaces — имена интерфейсов, с которых MediaMTX должен раздавать
+// ICE-кандидаты (MTX_WEBRTCIPSFROMINTERFACESLIST): адаптеры, которым
+// принадлежат адреса из rankLAN (то есть без VPN-туннелей и прочего
+// отсеянного), плюс loopback — чтобы превью в браузере на самом сервере
+// работало и без сети. Порядок — как отдала система, без повторов.
+//
+// Имена, а не адреса: MediaMTX берёт текущие адреса этих интерфейсов на
+// каждую сессию, так что смена адреса через DHCP не требует перезапуска.
+// Проверено на MediaMTX v1.21.3: без списка в SDP-ответе есть адрес VPN
+// 10.20.0.1, со списком "Ethernet,Loopback Pseudo-Interface 1" — нет.
+func webrtcInterfaces(adapters []adapterInfo) []string {
+	use := map[string]bool{}
+	for _, c := range rankLAN(adapters) {
+		use[c.adapter] = true
+	}
+
+	var names []string
+	for _, a := range adapters {
+		if !a.up {
+			continue
+		}
+		if use[a.name] || a.ifType == windows.IF_TYPE_SOFTWARE_LOOPBACK {
+			names = append(names, a.name)
+			use[a.name] = false // без повторов
+		}
+	}
+	return names
 }

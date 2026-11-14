@@ -6,11 +6,17 @@ import (
 	"strings"
 )
 
-// firewallRuleName — фиксированное DisplayName правила, по которому мы его
-// находим/создаём/удаляем. Не зависит от текущего порта в конфиге — если
-// порт сменили, правило с этим именем просто не совпадёт по LocalPort;
-// FirewallRuleExists это не проверяет (см. её комментарий).
-const firewallRuleName = "multirtmp API"
+// Фиксированные DisplayName правил, по которым мы их находим/создаём/удаляем.
+// Не зависят от текущего порта в конфиге — если порт сменили, правило с этим
+// именем просто не совпадёт по LocalPort; FirewallRuleExists это не
+// проверяет (см. её комментарий).
+const (
+	// APIFirewallRule — TCP-порт веб-интерфейса и API (доступ с планшета).
+	APIFirewallRule = "multirtmp API"
+	// PreviewFirewallRule — UDP-порт медиа WebRTC превью (MediaMTX). Без него
+	// планшет пройдёт сигнализацию через прокси, но картинку не получит.
+	PreviewFirewallRule = "multirtmp preview (WebRTC)"
+)
 
 // Правила проверяются/создаются/удаляются через модуль PowerShell
 // NetSecurity (Get-/New-/Remove-NetFirewallRule), а не через
@@ -24,29 +30,27 @@ func runPowerShell(script string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// FirewallRuleExists сообщает, существует ли правило firewallRuleName —
+// FirewallRuleExists сообщает, существует ли правило name —
 // независимо от того, на какой порт оно заведено (проверять совпадение
 // порта себе дороже: разные версии/среды по-разному отдают LocalPort в
 // текстовом виде). Практический эффект отличия невелик: если порт сменили
 // уже после того, как правило один раз создали под старый, эта проверка
 // решит, что всё в порядке, хотя новый порт не открыт. Достаточно для
 // текущей задачи — "рабочего правила нет вообще" остаётся надёжно поймано.
-func FirewallRuleExists() (bool, error) {
+func FirewallRuleExists(name string) (bool, error) {
 	out, err := runPowerShell(fmt.Sprintf(
-		`[bool](Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue)`, firewallRuleName))
+		`[bool](Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue)`, name))
 	if err != nil {
 		return false, fmt.Errorf("winservice: failed to query firewall rule: %w (%s)", err, out)
 	}
 	return strings.EqualFold(out, "True"), nil
 }
 
-// AddFirewallRule открывает port для входящих TCP-соединений в приватных
+// AddFirewallRule создаёт правило name: входящие protocol ("TCP"/"UDP") на port в приватных
 // сетях (profile=Private — не публичных/доменных, см. CLAUDE.md/задание:
 // "только частные сети").
-func AddFirewallRule(port string) error {
-	script := fmt.Sprintf(
-		`New-NetFirewallRule -DisplayName '%s' -Direction Inbound -Action Allow -Protocol TCP -LocalPort %s -Profile Private | Out-Null`,
-		firewallRuleName, port)
+func AddFirewallRule(name, protocol, port string) error {
+	script := FirewallRuleCommand(name, protocol, port) + " | Out-Null"
 
 	if out, err := runPowerShell(script); err != nil {
 		return fmt.Errorf("winservice: failed to add firewall rule: %w (%s)", err, out)
@@ -55,7 +59,7 @@ func AddFirewallRule(port string) error {
 	return nil
 }
 
-// RemoveFirewallRule удаляет правило firewallRuleName, если оно есть —
+// RemoveFirewallRule удаляет правило name, если оно есть —
 // Uninstall всегда может звать эту функцию, даже если правило никогда не
 // создавалось (addr был loopback всё время).
 //
@@ -66,14 +70,21 @@ func AddFirewallRule(port string) error {
 // $Error и просачивается в exit code) — проверено живьём на этой машине.
 // Раз уже проверяем наличие, отдельный `; exit 0` не нужен: если правила
 // нет, Remove вообще не вызывается.
-func RemoveFirewallRule() error {
+func RemoveFirewallRule(name string) error {
 	script := fmt.Sprintf(
 		`if (Get-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue) { Remove-NetFirewallRule -DisplayName '%s' -ErrorAction Stop }`,
-		firewallRuleName, firewallRuleName)
+		name, name)
 
 	if out, err := runPowerShell(script); err != nil {
 		return fmt.Errorf("winservice: failed to remove firewall rule: %w (%s)", err, out)
 	}
 
 	return nil
+}
+
+// FirewallRuleCommand — команда PowerShell, создающая правило name (её же
+// показывает подсказка в интерфейсе, если правила нет).
+func FirewallRuleCommand(name, protocol, port string) string {
+	return fmt.Sprintf(`New-NetFirewallRule -DisplayName "%s" -Direction Inbound -Action Allow -Protocol %s -LocalPort %s -Profile Private`,
+		name, protocol, port)
 }

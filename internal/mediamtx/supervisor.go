@@ -60,6 +60,10 @@ type Supervisor struct {
 	exe, conf string
 	logPath   string
 	logger    *slog.Logger
+	// env — дополнительные переменные окружения (MTX_*) для MediaMTX;
+	// вызывается перед КАЖДЫМ запуском, чтобы учитывать текущие сетевые
+	// адаптеры. nil — без дополнительных.
+	env func() []string
 
 	// Тайминги — поля, а не константы, чтобы тесты не ждали минутами.
 	runningAfter time.Duration   // сколько прожить, чтобы считаться running
@@ -75,11 +79,13 @@ type Supervisor struct {
 	notFound bool
 }
 
-// New готовит супервизор для exe с конфигом conf и логом logPath. Если exe
+// New готовит супервизор для exe с конфигом conf и логом logPath. env —
+// дополнительные переменные окружения для MediaMTX (может быть nil). Если exe
 // не существует, Run ничего не запускает, а Status навсегда
 // StateNotInstalled — релей важнее превью, это не ошибка старта.
-func New(exe, conf, logPath string, logger *slog.Logger) *Supervisor {
+func New(exe, conf, logPath string, env func() []string, logger *slog.Logger) *Supervisor {
 	s := &Supervisor{
+		env:          env,
 		exe:          exe,
 		conf:         conf,
 		logPath:      logPath,
@@ -264,6 +270,9 @@ func (s *Supervisor) runOnce(ctx context.Context, lw io.Writer) ([]string, error
 	cmd.Dir = filepath.Dir(s.exe)
 	cmd.Stdout = tw
 	cmd.Stderr = tw
+	if s.env != nil {
+		cmd.Env = append(os.Environ(), s.env()...)
+	}
 	// Без своей консоли: Ctrl+C в окне, где multirtmp запущен вручную, не
 	// должен доходить до MediaMTX в обход супервизора.
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}

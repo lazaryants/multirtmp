@@ -114,10 +114,24 @@ running (not installed, restarting, port taken), the Preview block says so
 instead of showing a browser error page; streaming to the destinations is
 never affected.
 
-The bundled `mediamtx.yml` lets only this computer publish to MediaMTX;
-anyone may watch. RTSP, HLS, SRT and MoQ are switched off. When upgrading
-MediaMTX, upgrade `mediamtx.yml` to the same version: MediaMTX refuses to
-start with settings it doesn't know.
+**Preview on a tablet.** The player is served by multirtmp itself, under
+`/preview/` on the same address and port as the web interface, so it works
+on whatever address the page was opened with — `127.0.0.1` on this
+computer, its LAN address or name on a tablet. It is protected by the same
+token: a tablet that opened the interface with the link from "Show link for
+tablet" can watch, a device without the token can't. MediaMTX's own web
+server listens on this computer only. The video itself goes over UDP port
+8189: `install` opens it in Windows Firewall for private networks, and
+`uninstall` closes it. If the rule is missing, the interface shows the
+command to create it. VPN tunnel adapters on this computer don't
+interfere: MediaMTX is told to offer only the network adapter that has the
+default gateway (plus this computer itself).
+
+The bundled `mediamtx.yml` lets only this computer publish to MediaMTX,
+and through multirtmp's `/preview/` nobody can publish at all — only
+watch. RTSP, HLS, SRT and MoQ are switched off. When upgrading MediaMTX,
+upgrade `mediamtx.yml` to the same version: MediaMTX refuses to start with
+settings it doesn't know.
 
 **Limitation:** the WebRTC preview can't show H.264 with B-frames (Main/High
 profile with B-frames enabled). For the preview to work, set the vMix

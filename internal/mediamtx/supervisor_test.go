@@ -37,6 +37,9 @@ func TestMain(m *testing.M) {
 		fmt.Println("2026/11/14 21:15:03 INF MediaMTX v1.21.3, windows, amd64")
 		fmt.Println("2026/11/14 21:15:03 ERR json: unknown field \"badKey\"")
 		os.Exit(1)
+	case "env":
+		fmt.Println("ENV MTX_WEBRTCIPSFROMINTERFACESLIST=" + os.Getenv("MTX_WEBRTCIPSFROMINTERFACESLIST"))
+		os.Exit(1)
 	case "live":
 		fmt.Println("2026/11/14 21:15:03 INF [RTMP] started")
 		time.Sleep(time.Hour)
@@ -70,7 +73,7 @@ func newFake(t *testing.T, mode string) *Supervisor {
 	t.Helper()
 	t.Setenv(fakeEnv, mode)
 	dir := t.TempDir()
-	s := New(os.Args[0], filepath.Join(dir, "mediamtx.yml"), filepath.Join(dir, "mediamtx.log"), testLogger())
+	s := New(os.Args[0], filepath.Join(dir, "mediamtx.yml"), filepath.Join(dir, "mediamtx.log"), nil, testLogger())
 	s.runningAfter = 300 * time.Millisecond
 	s.quickExit = 2 * time.Second
 	s.stableUptime = time.Hour
@@ -92,7 +95,7 @@ func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool)
 }
 
 func TestNotInstalled(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "nope", "mediamtx.exe"), "x.yml", "x.log", testLogger())
+	s := New(filepath.Join(t.TempDir(), "nope", "mediamtx.exe"), "x.yml", "x.log", nil, testLogger())
 	if s.Installed() {
 		t.Fatal("Installed() = true for a missing exe")
 	}
@@ -162,7 +165,7 @@ func TestCrashBackoff(t *testing.T) {
 }
 
 func TestBackoffSequence(t *testing.T) {
-	s := New("x", "x", "x", testLogger())
+	s := New("x", "x", "x", nil, testLogger())
 	want := []time.Duration{1, 2, 5, 10, 30, 60, 60, 60}
 	for i, w := range want {
 		_, _, got := s.classifyExit(time.Hour, nil, nil, i+1)
@@ -273,7 +276,7 @@ func TestTailWriterAndLastErrorLine(t *testing.T) {
 	if got := lastErrorLine([]string{"2026/11/14 21:18:45 INF [WebRTC] [session 1] closed: x"}); got != "" {
 		t.Fatalf("lastErrorLine without ERR = %q, want empty", got)
 	}
-	s := New("x", "x", "x", testLogger())
+	s := New("x", "x", "x", nil, testLogger())
 	if _, msg, _ := s.classifyExit(time.Minute, []string{"INF something"}, fmt.Errorf("exit status 1"), 1); msg != "process exited: exit status 1" {
 		t.Fatalf("msg = %q", msg)
 	}
@@ -328,4 +331,32 @@ func childPIDs(t *testing.T) []int {
 		}
 	}
 	return pids
+}
+
+// Переменные окружения доходят до процесса MediaMTX, и функция env
+// вызывается заново перед каждым запуском (адаптеры могли смениться).
+func TestEnvPassedOnEveryStart(t *testing.T) {
+	s := newFake(t, "env")
+	calls := 0
+	s.env = func() []string {
+		calls++
+		return []string{fmt.Sprintf("MTX_WEBRTCIPSFROMINTERFACESLIST=Ethernet-%d", calls)}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	waitFor(t, "2 starts", 5*time.Second, func() bool { return s.Status().Restarts >= 2 })
+	cancel()
+	<-done
+
+	log, err := os.ReadFile(s.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"=Ethernet-1", "=Ethernet-2"} {
+		if !strings.Contains(string(log), want) {
+			t.Fatalf("mediamtx.log lacks %q:\n%s", want, log)
+		}
+	}
 }

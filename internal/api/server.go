@@ -51,7 +51,12 @@ type NetworkInfo struct {
 // фронтенду достаточно проверить Enabled и подставить URL в iframe как есть.
 type PreviewInfo struct {
 	Enabled bool
-	URL     string
+	// URL — адрес плеера для iframe: путь под /preview/ на этом же сервере
+	// (см. preview_proxy.go), напр. "/preview/live/preview/".
+	URL string
+	// Target — адрес WebRTC-сервера MediaMTX, куда проксирует /preview/
+	// (preview.url, напр. "http://127.0.0.1:8889").
+	Target string
 	// MediaMTX — состояние дочернего MediaMTX (см. internal/mediamtx); nil,
 	// если превью выключено. Снимок под мьютексом супервизора — дёшево на
 	// каждый секундный /status.
@@ -110,6 +115,19 @@ func NewServer(addr, token string, network NetworkInfo, preview PreviewInfo, log
 	mux.HandleFunc("DELETE /outputs/{name}", s.handleOutputsDelete)
 	mux.HandleFunc("GET /", s.handleIndex)
 
+	if preview.Enabled && preview.Target != "" {
+		proxy, err := newPreviewProxy(preview.Target, logger)
+		if err != nil {
+			return nil, err
+		}
+		// По методу на шаблон: "/preview/" без метода конфликтует с "GET /"
+		// в ServeMux (ни один не уже другого). Разрешённые комбинации
+		// метод+путь проверяет сам прокси.
+		for _, m := range []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"} {
+			mux.Handle(m+" "+previewPrefix, proxy)
+		}
+	}
+
 	s.httpSrv = &http.Server{
 		Addr:    addr,
 		Handler: s.requireToken(mux),
@@ -147,7 +165,10 @@ func (s *Server) MaxOutputDelay() time.Duration {
 // логируют только r.URL.Path и причину.
 func (s *Server) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.validToken(r) {
+		if ok, viaCookie := s.validToken(r); ok {
+			if !viaCookie {
+				s.setPreviewCookie(w, r)
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -173,9 +194,9 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 // пустых строк возвращает 1, и без неё в loopback-режиме (токена нет) любой
 // запрос без токена считался бы "с верным токеном" и обходил проверки
 // Host/Origin.
-func (s *Server) validToken(r *http.Request) bool {
+func (s *Server) validToken(r *http.Request) (ok, viaCookie bool) {
 	if s.token == "" {
-		return false
+		return false, false
 	}
 
 	tok := r.URL.Query().Get("token")
@@ -184,8 +205,38 @@ func (s *Server) validToken(r *http.Request) bool {
 			tok = strings.TrimPrefix(auth, "Bearer ")
 		}
 	}
+	if tok != "" {
+		return subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1, false
+	}
 
-	return subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
+	// Cookie принимается ТОЛЬКО для путей превью (плеер в iframe не умеет
+	// слать заголовок) — остальное API по cookie не пускает.
+	if strings.HasPrefix(r.URL.Path, previewPrefix) {
+		if c, err := r.Cookie(previewCookie); err == nil {
+			return subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.token)) == 1, true
+		}
+	}
+	return false, false
+}
+
+// setPreviewCookie выдаёт cookie для путей превью клиенту, который только
+// что предъявил верный токен (query или Bearer), — если превью включено и
+// такой cookie у него ещё нет. Так планшет, открывший интерфейс по ссылке с
+// токеном, получает доступ и к плееру в iframe.
+func (s *Server) setPreviewCookie(w http.ResponseWriter, r *http.Request) {
+	if !s.preview.Enabled {
+		return
+	}
+	if c, err := r.Cookie(previewCookie); err == nil && c.Value == s.token {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     previewCookie,
+		Value:    s.token,
+		Path:     previewPrefix,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 // isLoopbackRemote — пришло ли TCP-соединение с самой этой машины. Решение

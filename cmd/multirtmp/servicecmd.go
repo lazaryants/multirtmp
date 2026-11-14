@@ -101,10 +101,9 @@ func cmdInstall(args []string) {
 	// wasn't possible to create it here.
 	if resolvedCfgPath, err := resolveConfigPath(*cfgPath); err == nil {
 		if cfg, err := config.Load(resolvedCfgPath); err == nil && !config.IsLoopbackAddr(cfg.APIAddr) {
-			if err := winservice.AddFirewallRule(portOf(cfg.APIAddr)); err != nil {
-				fmt.Fprintln(os.Stderr, "multirtmp install: warning: failed to add firewall rule:", err)
-			} else {
-				fmt.Println("firewall rule added for port", portOf(cfg.APIAddr), "(private networks)")
+			ensureFirewallRule(winservice.APIFirewallRule, "TCP", portOf(cfg.APIAddr))
+			if cfg.PreviewEnabled {
+				ensureFirewallRule(winservice.PreviewFirewallRule, "UDP", previewUDPPort)
 			}
 		}
 	}
@@ -120,8 +119,10 @@ func cmdUninstall() {
 
 	fmt.Println("service removed:", serviceName)
 
-	if err := winservice.RemoveFirewallRule(); err != nil {
-		fmt.Fprintln(os.Stderr, "multirtmp uninstall: warning: failed to remove firewall rule:", err)
+	for _, rule := range []string{winservice.APIFirewallRule, winservice.PreviewFirewallRule} {
+		if err := winservice.RemoveFirewallRule(rule); err != nil {
+			fmt.Fprintln(os.Stderr, "multirtmp uninstall: warning: failed to remove firewall rule:", err)
+		}
 	}
 
 	if err := winservice.RemoveDesktopShortcut(); err != nil {
@@ -223,4 +224,18 @@ func addDesktopShortcut(exePath, cfgPath string) {
 		return
 	}
 	fmt.Println("desktop shortcut created:", lnk)
+}
+
+// ensureFirewallRule — best-effort, как и ярлык: создаёт правило, только
+// если его ещё нет (повторный install не плодит дубликаты с тем же именем).
+func ensureFirewallRule(name, protocol, port string) {
+	if ok, err := winservice.FirewallRuleExists(name); err == nil && ok {
+		fmt.Println("firewall rule already exists:", name)
+		return
+	}
+	if err := winservice.AddFirewallRule(name, protocol, port); err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp install: warning: failed to add firewall rule:", err)
+		return
+	}
+	fmt.Printf("firewall rule added: %s, %s/%s (private networks)\n", name, port, protocol)
 }
