@@ -194,11 +194,15 @@ internal/notify/     алерты (Telegram)
 
 internal/winservice/ Windows-служба (SCM, recovery), правило Windows Firewall, ярлык на общем рабочем столе
 
+internal/mediamtx/   MediaMTX дочерним процессом: перезапуск с backoff, Job Object, лог, состояние для /status
+
 internal/logrotate/  ротирующий лог-файл
 
 internal/buildinfo/  версия и коммит, задаются через -ldflags
 
 build.ps1            релизная сборка с версией
+
+deploy/mediamtx/     комплектный mediamtx.yml (под MediaMTX v1.21.3); mediamtx.exe в репозиторий не кладём
 
 config.json          конфигурация (в .gitignore — содержит ключи потоков)
 

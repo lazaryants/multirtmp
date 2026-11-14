@@ -76,12 +76,17 @@ type APIConfig struct {
 // PreviewConfig — необязательный оперативный превью-плеер в интерфейсе, под
 // блоком STATUS. Сам релей ничего не декодирует и не перепаковывает: поток в
 // превью подаётся обычным выходом из outputs (оператор сам добавляет
-// назначение вида rtmp://.../preview) на внешний MediaMTX, который отдаёт
-// его через WebRTC — сюда попадает только адрес готовой плеер-страницы.
+// назначение вида rtmp://.../preview) на MediaMTX, который отдаёт его через
+// WebRTC. MediaMTX multirtmp запускает сам, дочерним процессом (см.
+// internal/mediamtx), если рядом есть mediamtx.exe.
 type PreviewConfig struct {
 	Enabled bool   `json:"enabled"`
 	URL     string `json:"url"`  // база MediaMTX WebRTC, напр. "http://127.0.0.1:8889"
 	Path    string `json:"path"` // ключ потока/путь на MediaMTX, напр. "preview"
+	// MediaMTXExe — путь к mediamtx.exe; пусто — mediamtxmediamtx.exe рядом
+	// с multirtmp.exe. Относительный путь — тоже от папки multirtmp.exe.
+	// Конфиг MediaMTX — mediamtx.yml в той же папке, что и exe.
+	MediaMTXExe string `json:"mediamtx_exe"`
 }
 
 type OutputConfig struct {
@@ -125,6 +130,9 @@ type Resolved struct {
 	// просто проверить, что поле не пусто.
 	PreviewEnabled bool
 	PreviewURL     string
+	// PreviewMediaMTXExe — preview.mediamtx_exe как есть (пусто — путь по
+	// умолчанию; разрешается относительно папки exe в cmd/multirtmp).
+	PreviewMediaMTXExe string
 
 	Outputs []ResolvedOutput
 }
@@ -305,6 +313,7 @@ func resolve(cfg *Config) (*Resolved, error) {
 		if cfg.Preview.URL != "" && cfg.Preview.Path != "" {
 			res.PreviewURL = strings.TrimRight(cfg.Preview.URL, "/") + "/" + strings.TrimLeft(cfg.Preview.Path, "/")
 		}
+		res.PreviewMediaMTXExe = cfg.Preview.MediaMTXExe
 	}
 
 	// notify (telegram) — либо оба поля заданы, либо ни одного

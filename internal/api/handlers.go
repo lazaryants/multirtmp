@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"multirtmp/internal/buildinfo"
+	"multirtmp/internal/mediamtx"
 	"multirtmp/internal/output"
 )
 
@@ -23,8 +24,9 @@ type networkJSON struct {
 }
 
 type previewJSON struct {
-	Enabled bool   `json:"enabled"`
-	URL     string `json:"url,omitempty"`
+	Enabled  bool             `json:"enabled"`
+	URL      string           `json:"url,omitempty"`
+	MediaMTX *mediamtx.Status `json:"mediamtx,omitempty"`
 }
 
 type buildJSON struct {
@@ -76,7 +78,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{
 		Build:   buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
 		Network: networkJSON{LANAccess: s.network.LANAccess, FirewallHint: s.network.FirewallHint},
-		Preview: previewJSON{Enabled: s.preview.Enabled, URL: s.preview.URL},
+		Preview: s.previewStatus(),
 		Source:  sj,
 		Buffer: bufferStatusJSON{
 			Bytes:     bufStats.Bytes,
@@ -142,4 +144,13 @@ func (s *Server) handleLANURLs(w http.ResponseWriter, r *http.Request) {
 		urls = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"urls": urls})
+}
+
+func (s *Server) previewStatus() previewJSON {
+	p := previewJSON{Enabled: s.preview.Enabled, URL: s.preview.URL}
+	if s.preview.Enabled && s.preview.MediaMTX != nil {
+		st := s.preview.MediaMTX()
+		p.MediaMTX = &st
+	}
+	return p
 }

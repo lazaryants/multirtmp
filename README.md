@@ -79,23 +79,41 @@ requires or prefers an encrypted connection.
 
 The web interface can embed a live preview player below the status section.
 multirtmp itself never decodes or re-packages video for this — it's built
-from two things that already exist:
+from two things:
 
-1. A second, separate program — [MediaMTX](https://github.com/bluenviron/mediamtx)
-   — installed alongside multirtmp on the same machine and registered as its
-   own Windows service (`mediamtx.exe` has its own `--help`/install options;
-   it's independent of multirtmp's own service). It listens for an RTMP
-   publish and serves it back out over WebRTC, among other protocols.
+1. [MediaMTX](https://github.com/bluenviron/mediamtx), which receives an RTMP
+   stream and serves it to the browser over WebRTC. Put it in a `mediamtx`
+   folder next to multirtmp, together with the `mediamtx.yml` from this
+   repository (`deploy/mediamtx/mediamtx.yml`, made for MediaMTX v1.21.3):
+
+   ```
+   C:\multirtmp\multirtmp.exe
+   C:\multirtmp\mediamtx\mediamtx.exe
+   C:\multirtmp\mediamtx\mediamtx.yml
+   ```
+
+   multirtmp starts MediaMTX by itself when `preview.enabled` is true,
+   restarts it if it stops, and stops it together with the service. Its log
+   goes to `mediamtx\mediamtx.log`. To use `mediamtx.exe` from another
+   place, set `preview.mediamtx_exe`; `mediamtx.yml` is then taken from that
+   folder. Don't register MediaMTX as a service of its own and don't start
+   it by hand — the port would be taken, and the interface says so.
 2. One more entry in multirtmp's own `outputs` — same as any other
    destination, just pointed at MediaMTX instead of YouTube or a corp
-   server, e.g. `rtmp://127.0.0.1:19350/preview` with whatever delay you
-   want the preview to run at.
+   server, e.g. Server URL `rtmp://127.0.0.1:19350/live`, Stream Key
+   `preview`, with whatever delay you want the preview to run at.
 
-Point `preview.url`/`preview.path` in `config.json` at that MediaMTX's WebRTC
-address and the same stream path, set `preview.enabled: true`, and the web UI
-embeds it automatically. There's no special coupling beyond that — multirtmp
-just forwards RTMP tags to MediaMTX exactly like it forwards them to any other
-destination; MediaMTX does the actual decoding for the browser player.
+Set `preview.url` to `http://127.0.0.1:8889`, `preview.path` to the same
+stream path (`live/preview` in the example above), and `preview.enabled:
+true` — the web UI embeds the player automatically. If MediaMTX isn't
+running (not installed, restarting, port taken), the Preview block says so
+instead of showing a browser error page; streaming to the destinations is
+never affected.
+
+The bundled `mediamtx.yml` lets only this computer publish to MediaMTX;
+anyone may watch. RTSP, HLS, SRT and MoQ are switched off. When upgrading
+MediaMTX, upgrade `mediamtx.yml` to the same version: MediaMTX refuses to
+start with settings it doesn't know.
 
 **Limitation:** the WebRTC preview can't show H.264 with B-frames (Main/High
 profile with B-frames enabled). For the preview to work, set the vMix
@@ -105,5 +123,7 @@ unchanged either way.
 
 Preview is entirely optional. On weaker hardware, or on a site where nobody
 needs to watch a preview in the browser, leave `preview.enabled: false` (the
-default) — MediaMTX doesn't need to be installed or running at all in that
-case, and no preview output needs to exist in `outputs`.
+default) — MediaMTX isn't started then, it doesn't need to be installed at
+all, and no preview output needs to exist in `outputs`. If preview is
+enabled but `mediamtx.exe` is missing, multirtmp still starts and streams
+normally; only the preview is unavailable.

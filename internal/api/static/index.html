@@ -130,6 +130,15 @@
     border: 0;
     display: block;
   }
+  .preview-message {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    max-width: 720px;
+    padding: 14px 16px;
+    color: var(--muted);
+  }
+  .preview-message.error { color: var(--red); }
 
   .outputs-grid {
     display: grid;
@@ -349,9 +358,10 @@
 
 <section id="preview-section" style="display:none">
   <h2>Preview</h2>
-  <div class="preview-wrap">
+  <div class="preview-wrap" id="preview-wrap" hidden>
     <iframe id="preview-frame" allow="autoplay" allowfullscreen title="Live preview"></iframe>
   </div>
+  <div class="preview-message" id="preview-message" hidden></div>
 </section>
 
 <section>
@@ -608,11 +618,32 @@ window.addEventListener('unhandledrejection', function (e) {
     btn.title = net.lan_access ? '' : 'api.addr is localhost-only — set it to a LAN address to enable this';
   }
 
-  // preview.{enabled,url} come from config.json and don't change without a
-  // restart — the iframe src is set once (previewSrc tracks what's already
-  // loaded) rather than on every 1s tick, so the embedded player doesn't
-  // reload itself every second.
+  // The player iframe exists only while MediaMTX is running. Otherwise the
+  // iframe would show the browser's own "can't connect" page, and keep
+  // showing it after MediaMTX comes back. previewSrc tracks what's loaded:
+  // src is set once per "running" stretch, not on every 1s tick (that would
+  // reload the player every second), and is reset when MediaMTX stops, so
+  // the player loads fresh when it's back.
   var previewSrc = '';
+
+  function previewMessage(m) {
+    switch (m.state) {
+      case 'not_installed':
+        return { text: 'Preview server is not installed: mediamtx\\mediamtx.exe was not found next to multirtmp.exe. Streaming is not affected.', error: true };
+      case 'port_in_use':
+        return { text: m.error || 'The preview server port is already in use.', error: true };
+      case 'restarting':
+        return {
+          text: 'Preview server stopped' + (m.error ? ': ' + m.error : '') +
+            (m.retry_in_s ? ' — restarting in ' + Math.ceil(m.retry_in_s) + 's.' : ' — restarting.'),
+          error: true
+        };
+      case 'stopped':
+        return { text: 'Preview server stopped.', error: false };
+      default: // starting
+        return { text: 'Preview server is starting…', error: false };
+    }
+  }
 
   function renderPreview(preview) {
     var section = document.getElementById('preview-section');
@@ -622,10 +653,31 @@ window.addEventListener('unhandledrejection', function (e) {
       return;
     }
     section.style.display = '';
-    if (preview.url !== previewSrc) {
-      document.getElementById('preview-frame').src = preview.url;
-      previewSrc = preview.url;
+
+    var wrap = document.getElementById('preview-wrap');
+    var frame = document.getElementById('preview-frame');
+    var msgEl = document.getElementById('preview-message');
+    var m = preview.mediamtx;
+
+    if (!m || m.state === 'running') {
+      msgEl.hidden = true;
+      wrap.hidden = false;
+      if (preview.url !== previewSrc) {
+        frame.src = preview.url;
+        previewSrc = preview.url;
+      }
+      return;
     }
+
+    wrap.hidden = true;
+    if (previewSrc) {
+      frame.src = 'about:blank';
+      previewSrc = '';
+    }
+    var msg = previewMessage(m);
+    if (msgEl.textContent !== msg.text) msgEl.textContent = msg.text;
+    msgEl.classList.toggle('error', msg.error);
+    msgEl.hidden = false;
   }
 
   async function fetchStatus() {

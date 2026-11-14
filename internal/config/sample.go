@@ -64,17 +64,22 @@ const sampleConfig = `{
   // Optional live preview player, embedded in the web UI below the status
   // section. multirtmp itself never decodes or re-packages anything for
   // this — the preview stream is just another entry in "outputs" below
-  // (e.g. pointed at "rtmp://127.0.0.1:19350/preview"), fed to a separate
-  // MediaMTX instance running alongside multirtmp, which serves it back out
-  // over WebRTC. "url" is that MediaMTX's WebRTC address, "path" is the
-  // stream's path/key on it — the player embeds "<url>/<path>". Leave
-  // "enabled": false (default) to skip this section of the UI entirely —
-  // on weaker hardware, or when a preview simply isn't needed on site,
-  // there's no need to run MediaMTX or add the preview output at all.
+  // (e.g. pointed at "rtmp://127.0.0.1:19350/preview"), fed to MediaMTX,
+  // which serves it back out over WebRTC. "url" is that MediaMTX's WebRTC
+  // address, "path" is the stream's path/key on it — the player embeds
+  // "<url>/<path>".
+  // When "enabled" is true, multirtmp starts MediaMTX itself and restarts it
+  // if it stops: by default mediamtx\mediamtx.exe next to multirtmp.exe,
+  // with mediamtx.yml from the same folder; "mediamtx_exe" overrides the
+  // path to mediamtx.exe (empty = default). If mediamtx.exe is missing,
+  // multirtmp still runs normally — only the preview is unavailable.
+  // Leave "enabled": false (default) to skip the preview entirely — on
+  // weaker hardware, or when a preview simply isn't needed on site.
   "preview": {
     "enabled": false,
     "url": "http://127.0.0.1:8889",
-    "path": "preview"
+    "path": "preview",
+    "mediamtx_exe": ""
   },
 
   // Outputs. url — without the stream key (the app part only, e.g.

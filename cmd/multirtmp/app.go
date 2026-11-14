@@ -12,6 +12,7 @@ import (
 	"multirtmp/internal/buffer"
 	"multirtmp/internal/config"
 	"multirtmp/internal/ingest"
+	"multirtmp/internal/mediamtx"
 	"multirtmp/internal/notify"
 	"multirtmp/internal/output"
 	"multirtmp/internal/winservice"
@@ -46,6 +47,13 @@ type appOptions struct {
 // winservice.PermanentError — сигнал не перезапускать процесс в цикле на
 // опечатке в config.json.
 func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, opts appOptions) error {
+	// До любого запуска дочерних процессов: всё, что runApp запустит дальше
+	// (MediaMTX), умрёт вместе с этим процессом при любом его завершении,
+	// включая аварийное. Не фатально — см. mediamtx.BindChildrenToProcess.
+	if err := mediamtx.BindChildrenToProcess(); err != nil {
+		logger.Warn("main: could not bind child processes to this one; falling back to per-child binding", "error", err)
+	}
+
 	if _, statErr := os.Stat(opts.cfgPath); os.IsNotExist(statErr) {
 		if err := config.WriteSample(opts.cfgPath); err != nil {
 			return &winservice.PermanentError{Err: fmt.Errorf("main: failed to create sample config: %w", err)}
@@ -144,6 +152,13 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	// Ссылки для планшета в интерфейсе вычисляются заново на каждый клик
 	// "Show link for tablet" (адрес машины меняется через DHCP); строка в
 	// логе выше — снимок на момент старта.
+	previewInfo := api.PreviewInfo{Enabled: cfg.PreviewEnabled, URL: cfg.PreviewURL}
+	var mtx *mediamtx.Supervisor
+	if cfg.PreviewEnabled {
+		mtx = newMediaMTXSupervisor(cfg.PreviewMediaMTXExe, logger)
+		previewInfo.MediaMTX = mtx.Status
+	}
+
 	network := api.NetworkInfo{
 		LANAccess: !config.IsLoopbackAddr(cfg.APIAddr),
 		LANURLs: func() ([]string, error) {
@@ -152,7 +167,7 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 		FirewallHint: firewallHint,
 	}
 	apiSrv, err := api.NewServer(cfg.APIAddr, cfg.APIToken, network,
-		api.PreviewInfo{Enabled: cfg.PreviewEnabled, URL: cfg.PreviewURL},
+		previewInfo,
 		logger, ingestSrv, buf, registry, opts.cfgPath, notifier)
 	if err != nil {
 		return fmt.Errorf("main: failed to start api server: %w", err)
@@ -160,6 +175,16 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 
 	if cfg.BufferAuto {
 		go runBufferAutosize(appCtx, buf, ingestSrv, logger, apiSrv.MaxOutputDelay, cfg.BufferMaxSize)
+	}
+
+	mtxDone := make(chan struct{})
+	if mtx != nil {
+		go func() {
+			defer close(mtxDone)
+			mtx.Run(appCtx)
+		}()
+	} else {
+		close(mtxDone)
 	}
 
 	ingestErrCh := make(chan error, 1)
@@ -204,6 +229,7 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	}
 
 	registry.Wait()
+	<-mtxDone
 
 	return nil
 }

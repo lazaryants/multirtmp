@@ -17,6 +17,7 @@ import (
 
 	"multirtmp/internal/buffer"
 	"multirtmp/internal/ingest"
+	"multirtmp/internal/mediamtx"
 	"multirtmp/internal/notify"
 	"multirtmp/internal/output"
 )
@@ -51,6 +52,10 @@ type NetworkInfo struct {
 type PreviewInfo struct {
 	Enabled bool
 	URL     string
+	// MediaMTX — состояние дочернего MediaMTX (см. internal/mediamtx); nil,
+	// если превью выключено. Снимок под мьютексом супервизора — дёшево на
+	// каждый секундный /status.
+	MediaMTX func() mediamtx.Status
 }
 
 // Server — HTTP API + статика поверх ingest/buffer/output.
