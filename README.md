@@ -9,14 +9,18 @@ independently configurable delay — e.g. a corporate feed at 0s, YouTube at
 
 1. `.\multirtmp.exe install` — registers the Windows service and puts a
    **multirtmp** icon on the desktop of every user of this computer
-   (one-time, as administrator).
-2. Edit `config.json` (created next to the exe the first time it runs) —
-   set your destinations and delays.
-3. `.\multirtmp.exe start` — starts it.
-4. Double-click the **multirtmp** icon on the desktop — it opens live status
-   and destination management in its own window.
+   (one-time, as administrator). If there is no `config.json` next to the
+   exe yet, it creates one: web interface reachable from the local network
+   with this computer's own random token, preview on, and three
+   destinations — `youtube` (15 s delay) and `company` without stream keys
+   yet, and `preview`. An existing `config.json` is never touched.
+2. `.\multirtmp.exe start` — starts it.
+3. Double-click the **multirtmp** icon on the desktop — it opens live status
+   and destination management in its own window. Destinations without a
+   stream key show as **NOT CONFIGURED**: press **Enter stream key**, fill
+   in the server URL and key, Save — the destination starts.
 
-Steps 1-2 are one-time setup, done once when deploying to a machine. After
+Steps 1 and 3 are one-time setup, done once when deploying to a machine. After
 `install`, the service is registered to start automatically on Windows boot —
 day to day, turning the computer on is enough. You only need `start` again if
 the service was stopped by hand.

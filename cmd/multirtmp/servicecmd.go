@@ -78,6 +78,21 @@ func cmdInstall(args []string) {
 
 	fmt.Println("service installed:", serviceName)
 
+	// Начальный config.json для площадки — только если его ещё нет.
+	// Существующий не трогается никогда: на площадках в нём ключи потоков.
+	// Делается до правила брандмауэра ниже: новый конфиг открывает API в
+	// локальную сеть, и правило для его порта создаётся тем же кодом.
+	if resolvedCfgPath, err := resolveConfigPath(*cfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp install: warning: failed to resolve config path:", err)
+	} else if created, err := config.WriteInstallConfig(resolvedCfgPath); err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp install: warning: failed to create config.json:", err)
+	} else if created {
+		fmt.Println("config.json created:", resolvedCfgPath)
+		fmt.Println("  start the service, then open the web interface (desktop icon) and enter the stream keys")
+	} else {
+		fmt.Println("config.json already exists, left untouched:", resolvedCfgPath)
+	}
+
 	// Best-effort: if config.json already exists and is set up for LAN
 	// access, open the port now. If it doesn't exist yet (typical on first
 	// deployment — the operator hasn't created/edited it), this is skipped
