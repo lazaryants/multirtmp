@@ -73,6 +73,12 @@ embeds it automatically. There's no special coupling beyond that — multirtmp
 just forwards RTMP tags to MediaMTX exactly like it forwards them to any other
 destination; MediaMTX does the actual decoding for the browser player.
 
+**Limitation:** the WebRTC preview can't show H.264 with B-frames (Main/High
+profile with B-frames enabled). For the preview to work, set the vMix
+encoder to the Baseline profile or B-frames = 0. This only affects the
+browser preview — the RTMP destinations themselves receive the stream
+unchanged either way.
+
 Preview is entirely optional. On weaker hardware, or on a site where nobody
 needs to watch a preview in the browser, leave `preview.enabled: false` (the
 default) — MediaMTX doesn't need to be installed or running at all in that

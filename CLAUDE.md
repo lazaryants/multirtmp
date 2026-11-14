@@ -178,19 +178,29 @@ Backoff: 0 → 0.5 → 1 → 2 → 5 с, дальше 5 с бесконечно.
 
 Структура
 
-cmd/multirtmp/       main, флаги, запуск службы
+cmd/multirtmp/       main, флаги, команды службы (install/start/stop/status/uninstall), автоподбор буфера, LAN-ссылка
 
-internal/ingest/     RTMP-сервер, парсинг тегов
+internal/ingest/     RTMP-сервер, парсинг тегов, watchdog источника
 
-internal/buffer/     кольцевой буфер, курсоры, keyframe-индекс
+internal/buffer/     кольцевой буфер, курсоры, keyframe-индекс, статистика буфера
 
-internal/output/     исходящий воркер: пейсинг, реконнект, rebase
+internal/output/     исходящий воркер: пейсинг, реконнект, rebase; реестр выходов
 
-internal/api/        HTTP API + embed статики
+internal/config/     загрузка и валидация config.json, образец конфига, сохранение секции outputs
+
+internal/api/        HTTP API, токен для LAN-доступа, embed веб-интерфейса (static/)
 
 internal/notify/     алерты (Telegram)
 
-config.json          конфигурация
+internal/winservice/ Windows-служба (SCM, recovery), правило Windows Firewall
+
+internal/logrotate/  ротирующий лог-файл
+
+internal/buildinfo/  версия и коммит, задаются через -ldflags
+
+build.ps1            релизная сборка с версией
+
+config.json          конфигурация (в .gitignore — содержит ключи потоков)
 
 Окружение
 
@@ -250,9 +260,11 @@ vMix публикует на rtmp://127.0.0.1:1935/live/test.
 
 &#x20;4. Устойчивость. Реконнекты, backoff, watchdog на источник, дедлайны.
 
-&#x20;5. Управление. config.json, HTTP API на 127.0.0.1, /status, статика через embed.
+&#x20;5. Управление. config.json, HTTP API на 127.0.0.1, /status.
 
 &#x20;6. Продакшн. Windows-служба, алерты, стрип бинарника, обкатка на площадке.
+
+&#x20;7. Веб-интерфейс. Статика через embed, управление выходами (Add/Edit/Delete/Start/Stop с записью в config.json), доступ с планшета по LAN с токеном, опциональное превью через MediaMTX.
 
 Правила работы с кодом
 
@@ -278,5 +290,5 @@ gofmt обязателен. go vet перед каждым коммитом.
 
 Не делаем аутентификацию на ingest — слушаем только 127.0.0.1.
 
-Не открываем API наружу — только 127.0.0.1, без токенов.
+API по умолчанию — только 127.0.0.1, без токена. Доступ по LAN (с планшета) — только по явной настройке api.addr на не-loopback адрес, и тогда api.token обязателен: без него программа отказывается стартовать. Наружу в интернет API не открываем.
 
