@@ -8,6 +8,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -175,6 +176,10 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 
 		if !isLoopbackRemote(r.RemoteAddr) {
 			s.logger.Warn("api: rejected request with missing/invalid token", "path", r.URL.Path)
+			if wantsHTML(r) {
+				writeUnauthorizedPage(w)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, errors.New("unauthorized: missing or invalid token"))
 			return
 		}
@@ -325,4 +330,44 @@ func (s *Server) Close() error {
 		return fmt.Errorf("api: failed to stop server: %w", err)
 	}
 	return nil
+}
+
+// wantsHTML — запрос пришёл от браузера за страницей (адресная строка,
+// iframe), а не от скрипта интерфейса за JSON: браузер в таком случае шлёт
+// Accept с text/html, fetch из интерфейса — нет.
+func wantsHTML(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// unauthorizedPage — что видит человек, открывший интерфейс с другого
+// устройства без токена (вместо сырого JSON). Без внешних ресурсов.
+const unauthorizedPage = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multirtmp — access by link only</title>
+<style>
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f5f6f8; color: #1f2937; }
+  main { max-width: 34rem; margin: 15vh auto 0; padding: 0 20px; }
+  h1 { font-size: 1.4rem; margin: 0 0 12px; }
+  p { line-height: 1.5; margin: 0 0 12px; color: #374151; }
+  strong { white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Access by link only</h1>
+  <p>This page can only be opened with a link that includes an access token.</p>
+  <p>On the computer running vMix, open the multirtmp window and press <strong>Show link for tablet</strong>, then open that link on this device.</p>
+</main>
+</body>
+</html>
+`
+
+func writeUnauthorizedPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = io.WriteString(w, unauthorizedPage)
 }

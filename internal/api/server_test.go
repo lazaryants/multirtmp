@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -72,6 +73,49 @@ func TestRequireToken(t *testing.T) {
 
 			if rec.Code != tc.want {
 				t.Fatalf("got %d, want %d (body: %s)", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+// Без токена с другого устройства: браузер за страницей получает понятную
+// HTML-страницу, скрипт интерфейса за JSON — прежний JSON. Код 401 в обоих
+// случаях.
+func TestUnauthorizedPageForBrowsers(t *testing.T) {
+	s := &Server{token: "tok", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	h := s.requireToken(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+
+	cases := []struct {
+		name, accept string
+		html         bool
+	}{
+		{"browser page", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", true},
+		{"api fetch", "*/*", false},
+		{"api json", "application/json", false},
+		{"no accept", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.RemoteAddr = "192.168.1.50:51000"
+			req.Host = "192.168.1.12:8080"
+			if tc.accept != "" {
+				req.Header.Set("Accept", tc.accept)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("code = %d, want 401", rec.Code)
+			}
+			ct := rec.Header().Get("Content-Type")
+			body := rec.Body.String()
+			if tc.html {
+				if !strings.HasPrefix(ct, "text/html") || !strings.Contains(body, "Show link for tablet") || strings.Contains(body, `"error"`) {
+					t.Fatalf("want HTML page, got %q: %s", ct, body)
+				}
+			} else if !strings.Contains(ct, "json") || !strings.Contains(body, "unauthorized: missing or invalid token") {
+				t.Fatalf("want JSON, got %q: %s", ct, body)
 			}
 		})
 	}
