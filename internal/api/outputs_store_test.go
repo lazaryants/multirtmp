@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -94,7 +95,7 @@ func TestOutputsStoreSurvivesOutOfBandEdit(t *testing.T) {
 
 	// Оператор кликает что-то в интерфейсе — совершенно не связанное с
 	// preview (добавляет второй выход). Раньше именно это стирало правку выше.
-	if _, err := s.Add(OutputInput{Name: "youtube", URL: "rtmp://a.rtmp.youtube.com/live2", Key: "REPLACE_ME", Delay: "15s", Enabled: false}); err != nil {
+	if _, err := s.Add(OutputInput{Name: "youtube", URL: "rtmp://a.rtmp.youtube.com/live2", Key: "abcd-1234-efgh", Delay: "15s", Enabled: false}); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 
@@ -182,5 +183,62 @@ func TestOutputsStoreNeverWritesWithoutAMutation(t *testing.T) {
 	// transiently, but only when it actually runs).
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Fatalf("a .tmp file exists even though nothing was saved: %v", err)
+	}
+}
+
+// Через API выход сохраняется только настроенным: пустой ключ и плейсхолдер
+// REPLACE_ME — ошибка ввода (ненастроенные выходы появляются только из
+// config.json, их создаёт install).
+func TestValidateOutputInputRejectsPlaceholders(t *testing.T) {
+	cases := []struct {
+		name string
+		in   OutputInput
+		ok   bool
+	}{
+		{"real", OutputInput{URL: "rtmp://a.rtmp.youtube.com/live2", Key: "abcd-1234", Delay: "15s"}, true},
+		{"empty key", OutputInput{URL: "rtmp://a.rtmp.youtube.com/live2", Key: ""}, false},
+		{"placeholder key", OutputInput{URL: "rtmp://a.rtmp.youtube.com/live2", Key: "REPLACE_ME"}, false},
+		{"placeholder key lowercase", OutputInput{URL: "rtmp://a.rtmp.youtube.com/live2", Key: " replace_me "}, false},
+		{"empty url", OutputInput{URL: "  ", Key: "abcd"}, false},
+	}
+	for _, tc := range cases {
+		_, err := validateOutputInput(tc.in, "youtube", map[string]bool{})
+		if (err == nil) != tc.ok {
+			t.Errorf("%s: err = %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}
+
+// Ненастроенный выход из config.json: в списке — not_configured, Start —
+// 409-конфликт, а config.json при этом не переписывается.
+func TestNotConfiguredOutputCannotStart(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"outputs": [{"name": "youtube", "url": "rtmp://a.rtmp.youtube.com/live2", "key": "", "delay": "15s", "enabled": false}]}`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(t, cfgPath)
+	s.registry.Register("youtube", nil)
+
+	views, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(views) != 1 || views[0].State != output.StateNotConfigured {
+		t.Fatalf("views = %+v", views)
+	}
+
+	_, err = s.SetEnabled("youtube", true)
+	var ce output.ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("SetEnabled(true): got %v, want a ConflictError", err)
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != raw {
+		t.Fatalf("config.json was rewritten on a refused start:\n%s", after)
 	}
 }

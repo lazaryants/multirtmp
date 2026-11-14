@@ -28,6 +28,9 @@ const (
 	StateWaitingForSource State = "waiting_for_source"
 	StateConnecting       State = "connecting"
 	StateStreaming        State = "streaming"
+	// StateNotConfigured — у выхода нет url или ключа (см.
+	// config.ResolvedOutput.Configured); воркера нет, Start недоступен.
+	StateNotConfigured State = "not_configured"
 )
 
 // reconnectRateWindow/reconnectRateThreshold — порог алерта "шторм реконнектов".

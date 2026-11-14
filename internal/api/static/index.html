@@ -446,14 +446,17 @@ window.addEventListener('unhandledrejection', function (e) {
       // "stopped" always means the operator's choice is remembered, not just
       // this session's runtime state, so say so here rather than leaving it
       // ambiguous.
-      stopped: "STOPPED (won't auto-start)"
+      stopped: "STOPPED (won't auto-start)",
+      // No server URL or stream key yet (e.g. right after install) — nothing
+      // to connect to; the card offers "Enter stream key" instead of Start.
+      not_configured: 'NOT CONFIGURED'
     };
     return labels[s] || String(s).toUpperCase();
   }
 
   function colorFor(state, lastError) {
     if (state === 'streaming') return 'green';
-    if (state === 'stopped') return 'grey';
+    if (state === 'stopped' || state === 'not_configured') return 'grey';
     if (lastError) return 'red';
     return 'yellow';
   }
@@ -808,7 +811,10 @@ window.addEventListener('unhandledrejection', function (e) {
     };
 
     refs.nameEl.textContent = o.name;
-    refs.startStop.addEventListener('click', function () { toggleRun(o.name, refs._running); });
+    refs.startStop.addEventListener('click', function () {
+      if (refs._notConfigured) openEdit(o.name);
+      else toggleRun(o.name, refs._running);
+    });
     refs.edit.addEventListener('click', function () { openEdit(o.name); });
     refs.del.addEventListener('click', function () { doDelete(o.name); });
 
@@ -823,19 +829,24 @@ window.addEventListener('unhandledrejection', function (e) {
   // != comparison so unrelated ticks (e.g. only the source card changed)
   // don't even dirty rows whose content didn't actually change.
   function updateViewRow(refs, o, live) {
-    var state = live ? live.state : 'stopped';
-    var running = state !== 'stopped';
+    var state = live ? live.state : (o.state || 'stopped');
+    var notConfigured = state === 'not_configured';
+    var running = state !== 'stopped' && !notConfigured;
     refs._running = running;
+    refs._notConfigured = notConfigured;
 
     var color = colorFor(state, live && live.last_error);
     var dotClass = 'dot ' + color;
     if (refs.dot.className !== dotClass) refs.dot.className = dotClass;
 
-    var urlHtml = esc(o.url) + '<span class="key-badge" title="stream key (masked)">key: ' + esc(maskKey(o.key)) + '</span>';
+    var urlHtml = notConfigured
+      ? '<span class="muted">' + (isPlaceholder(o.url) ? 'server URL not set' : esc(o.url)) + '</span>' +
+        '<span class="key-badge">key: ' + (isPlaceholder(o.key) ? 'not set' : esc(maskKey(o.key))) + '</span>'
+      : esc(o.url) + '<span class="key-badge" title="stream key (masked)">key: ' + esc(maskKey(o.key)) + '</span>';
     if (refs.url.innerHTML !== urlHtml) refs.url.innerHTML = urlHtml;
 
-    var meta = 'delay ' + esc(o.delay) + ' · ' + (o.enabled ? 'enabled' : 'disabled');
-    if (live) {
+    var meta = 'delay ' + esc(o.delay) + ' · ' + (notConfigured ? 'NOT CONFIGURED — enter the server URL and stream key' : (o.enabled ? 'enabled' : 'disabled'));
+    if (live && !notConfigured) {
       meta += ' · ' + esc(stateLabel(live.state));
       if (live.last_error) meta += ' — ' + esc(truncate(live.last_error, 90));
     }
@@ -848,7 +859,7 @@ window.addEventListener('unhandledrejection', function (e) {
     // gap that let a double-click open two connections to the destination.
     var pending = pendingByName[o.name];
     var busy = !!pending;
-    var startStopLabel = running ? 'Stop' : 'Start';
+    var startStopLabel = notConfigured ? 'Enter stream key' : (running ? 'Stop' : 'Start');
     if (busy && (pending.action === 'start' || pending.action === 'stop')) startStopLabel = '⏳';
     var deleteLabel = (busy && pending.action === 'delete') ? '⏳' : 'Delete';
 
@@ -914,6 +925,15 @@ window.addEventListener('unhandledrejection', function (e) {
 
   function openEdit(name) {
     var o = outputsConfig.find(function (x) { return x.name === name; });
+    // A not-configured output: blank out placeholders (REPLACE_ME) and
+    // pre-tick Enabled — once the key is entered it should just start.
+    if (o && o.state === 'not_configured') {
+      o = Object.assign({}, o, {
+        url: isPlaceholder(o.url) ? '' : o.url,
+        key: isPlaceholder(o.key) ? '' : o.key,
+        enabled: true
+      });
+    }
     openModal(function (dialog, close) {
       buildOutputForm(dialog, {
         title: 'Edit ' + name,
@@ -987,6 +1007,12 @@ window.addEventListener('unhandledrejection', function (e) {
   // two on blur; it ended up fighting with direct edits to those two fields
   // and overwriting whatever the operator had just typed, so it's gone
   // entirely — two fields, exactly what's typed into them is what's saved.
+  // Same rule as config.IsPlaceholder on the server.
+  function isPlaceholder(s) {
+    s = (s || '').trim();
+    return s === '' || s.toUpperCase() === 'REPLACE_ME';
+  }
+
   function looksLikeKeyInUrl(url) {
     var m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\/]+\/(.*)$/.exec(url.trim());
     if (!m) return false;

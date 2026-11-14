@@ -141,9 +141,14 @@ type Resolved struct {
 // CombineURLKey) — готов к передаче в output.NewWorker как есть.
 type ResolvedOutput struct {
 	Name    string
-	URL     string
+	URL     string // пусто, если !Configured
 	Delay   time.Duration
 	Enabled bool
+	// Configured — url и ключ заданы (не пустые и не плейсхолдер вроде
+	// REPLACE_ME). Ненастроенный выход — допустимый конфиг (так его создаёт
+	// install): он не запускается и никуда не подключается, пока оператор
+	// не впишет данные через Edit.
+	Configured bool
 }
 
 // ConfigError оборачивает ошибку загрузки/валидации конфига — сигнал
@@ -339,12 +344,9 @@ func resolve(cfg *Config) (*Resolved, error) {
 			seenNames[o.Name] = true
 		}
 
-		if o.URL == "" {
-			addf("%s.url: required", path)
-		}
-		if o.Key == "" {
-			addf("%s.key: required", path)
-		}
+		// Пустые url/key или плейсхолдер — не ошибка, а "не настроено" (см.
+		// ResolvedOutput.Configured).
+		configured := !IsPlaceholder(o.URL) && !IsPlaceholder(o.Key)
 
 		delay := time.Duration(0)
 		if o.Delay != "" {
@@ -363,13 +365,12 @@ func resolve(cfg *Config) (*Resolved, error) {
 			enabled = *o.Enabled
 		}
 
-		if o.Name != "" && o.URL != "" && o.Key != "" {
-			res.Outputs = append(res.Outputs, ResolvedOutput{
-				Name:    o.Name,
-				URL:     CombineURLKey(o.URL, o.Key),
-				Delay:   delay,
-				Enabled: enabled,
-			})
+		if o.Name != "" {
+			ro := ResolvedOutput{Name: o.Name, Delay: delay, Enabled: enabled, Configured: configured}
+			if configured {
+				ro.URL = CombineURLKey(o.URL, o.Key)
+			}
+			res.Outputs = append(res.Outputs, ro)
 		}
 	}
 
@@ -456,4 +457,12 @@ func ParseSize(v string) (int64, error) {
 	}
 
 	return n * mult, nil
+}
+
+// IsPlaceholder — значение url/ключа выхода, которое на самом деле не задано:
+// пустое (или из пробелов) либо плейсхолдер из образца конфига (REPLACE_ME,
+// без учёта регистра).
+func IsPlaceholder(s string) bool {
+	s = strings.TrimSpace(s)
+	return s == "" || strings.EqualFold(s, "REPLACE_ME")
 }

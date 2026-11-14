@@ -44,6 +44,9 @@ type registryEntry struct {
 	// (карта целиком) держится кратко, как и раньше.
 	opMu sync.Mutex
 
+	// worker — nil, если выход не настроен (нет url или ключа, см.
+	// config.ResolvedOutput.Configured): воркеру без адреса подключаться
+	// некуда, Start такой записи отвечает notConfiguredError.
 	worker *Worker
 	cancel context.CancelFunc // nil, если не запущен; под Registry.mu
 	done   chan struct{}      // закрывается, когда Run() вернулась; nil, если не запущен; под Registry.mu
@@ -76,6 +79,13 @@ func (e *alreadyStoppedError) Error() string {
 }
 func (e *alreadyStoppedError) outputConflict() {}
 
+type notConfiguredError struct{ name string }
+
+func (e *notConfiguredError) Error() string {
+	return fmt.Sprintf("output %q is not configured — enter its server URL and stream key first", e.name)
+}
+func (e *notConfiguredError) outputConflict() {}
+
 // NewRegistry создаёт реестр. ctx — корневой контекст процесса: все
 // запущенные через Start выходы получают контекст, производный от него, и
 // автоматически останавливаются при его отмене.
@@ -83,7 +93,8 @@ func NewRegistry(ctx context.Context) *Registry {
 	return &Registry{ctx: ctx, items: map[string]*registryEntry{}}
 }
 
-// Register регистрирует воркер под именем name, не запуская его.
+// Register регистрирует воркер под именем name, не запуская его. w == nil —
+// выход не настроен (см. registryEntry.worker).
 func (r *Registry) Register(name string, w *Worker) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -131,6 +142,10 @@ func (r *Registry) Start(name string) error {
 	}
 	defer unlock()
 
+	if e.worker == nil {
+		return &notConfiguredError{name: name}
+	}
+
 	r.mu.Lock()
 	running := e.cancel != nil
 	r.mu.Unlock()
@@ -151,7 +166,7 @@ func (r *Registry) Start(name string) error {
 // startLocked запускает воркер entry, если он ещё не запущен. Вызывающий уже
 // держит r.mu.
 func (r *Registry) startLocked(e *registryEntry) {
-	if e.cancel != nil {
+	if e.cancel != nil || e.worker == nil {
 		return
 	}
 
@@ -357,7 +372,11 @@ func (r *Registry) Snapshot() []Status {
 	defer r.mu.Unlock()
 
 	out := make([]Status, 0, len(r.items))
-	for _, e := range r.items {
+	for name, e := range r.items {
+		if e.worker == nil {
+			out = append(out, Status{Name: name, State: StateNotConfigured})
+			continue
+		}
 		st := e.worker.Status()
 		switch opState(e.op.Load()) {
 		case opStarting:

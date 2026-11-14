@@ -203,3 +203,45 @@ func TestValidatePublicHost(t *testing.T) {
 		}
 	}
 }
+
+// Пустой url/ключ или REPLACE_ME — не ошибка конфига, а "не настроено".
+func TestLoadNotConfiguredOutputs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{
+  "outputs": [
+    {"name": "youtube", "url": "rtmp://a.rtmp.youtube.com/live2", "key": "", "delay": "15s"},
+    {"name": "company", "url": "", "key": ""},
+    {"name": "old", "url": "rtmp://x/live", "key": "REPLACE_ME"},
+    {"name": "preview", "url": "rtmp://127.0.0.1:19350/live", "key": "preview"}
+  ]
+}`
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := map[string]bool{"youtube": false, "company": false, "old": false, "preview": true}
+	if len(res.Outputs) != len(want) {
+		t.Fatalf("outputs = %+v", res.Outputs)
+	}
+	for _, o := range res.Outputs {
+		if o.Configured != want[o.Name] {
+			t.Errorf("%s: Configured = %v, want %v", o.Name, o.Configured, want[o.Name])
+		}
+		if !o.Configured && o.URL != "" {
+			t.Errorf("%s: URL = %q, want empty for a not-configured output", o.Name, o.URL)
+		}
+	}
+
+	// Пустое имя по-прежнему ошибка.
+	if err := os.WriteFile(path, []byte(`{"outputs": [{"name": "", "url": "", "key": ""}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("empty name: expected an error")
+	}
+}

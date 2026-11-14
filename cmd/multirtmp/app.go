@@ -102,6 +102,13 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	registry := output.NewRegistry(appCtx)
 	var toStart []string
 	for _, o := range cfg.Outputs {
+		if !o.Configured {
+			// Нет url или ключа — регистрируем без воркера: виден в
+			// интерфейсе как NOT CONFIGURED, никуда не подключается.
+			registry.Register(o.Name, nil)
+			logger.Info("main: output is not configured yet, enter its server URL and stream key in the web UI", "name", o.Name)
+			continue
+		}
 		w := output.NewWorker(o.Name, o.URL, o.Delay, buf, logger, notifier)
 		registry.Register(o.Name, w)
 		if o.Enabled {
@@ -262,10 +269,11 @@ func applyFlagOverrides(cfg *config.Resolved, opts appOptions) {
 		cfg.Outputs = make([]config.ResolvedOutput, 0, len(opts.overrideOuts))
 		for i, o := range opts.overrideOuts {
 			cfg.Outputs = append(cfg.Outputs, config.ResolvedOutput{
-				Name:    fmt.Sprintf("out%d", i),
-				URL:     o.URL,
-				Delay:   o.Delay,
-				Enabled: true,
+				Name:       fmt.Sprintf("out%d", i),
+				URL:        o.URL,
+				Delay:      o.Delay,
+				Enabled:    true,
+				Configured: true,
 			})
 		}
 	}

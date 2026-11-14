@@ -139,6 +139,12 @@ func viewFrom(o config.OutputConfig, st output.Status) OutputView {
 		v.UptimeS = st.UptimeS
 	}
 
+	// По файлу: если url или ключ не заданы, выход "не настроен" независимо от
+	// того, что есть в Registry (например, выход ещё не зарегистрирован).
+	if config.IsPlaceholder(o.URL) || config.IsPlaceholder(o.Key) {
+		v.State = output.StateNotConfigured
+	}
+
 	return v
 }
 
@@ -403,11 +409,14 @@ func validateOutputInput(in OutputInput, name string, existing map[string]bool) 
 		problems = append(problems, fmt.Sprintf("name: %q already exists", name))
 	}
 
-	if strings.TrimSpace(in.URL) == "" {
+	// Через API выход сохраняется только настроенным: пустое значение или
+	// плейсхолдер из образца (REPLACE_ME) — ошибка ввода. Ненастроенные выходы
+	// появляются только из config.json (их создаёт install).
+	if config.IsPlaceholder(in.URL) {
 		problems = append(problems, "url: required")
 	}
-	if in.Key == "" {
-		problems = append(problems, "key: required")
+	if config.IsPlaceholder(in.Key) {
+		problems = append(problems, "key: required — enter the real stream key")
 	}
 
 	delayStr := in.Delay
