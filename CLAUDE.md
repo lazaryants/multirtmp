@@ -204,6 +204,10 @@ build.ps1            релизная сборка с версией
 
 deploy/mediamtx/     комплектный mediamtx.yml (под MediaMTX v1.21.3); mediamtx.exe в репозиторий не кладём
 
+deploy/installer/    установщик Inno Setup 6 (multirtmp.iss, parse.iss; test/ — проверка разбора без запуска установщика)
+
+build-installer.ps1  сборка dist\multirtmp-setup-<версия>.exe (build.ps1 + mediamtx.exe из локальной папки + ISCC)
+
 config.json          конфигурация (в .gitignore — содержит ключи потоков)
 
 Окружение

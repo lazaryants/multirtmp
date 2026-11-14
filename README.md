@@ -5,7 +5,56 @@ byte-exact (no re-encoding) to multiple destinations, each with its own
 independently configurable delay — e.g. a corporate feed at 0s, YouTube at
 10-15s.
 
-## Quick start
+## Installing and updating
+
+Run `multirtmp-setup-<version>.exe` as administrator. It installs to
+`C:\multirtmp` (no choice of folder): `multirtmp.exe`, MediaMTX for the
+preview in `mediamtx\`, this README. Then it registers and starts the
+service. On the last page, **Open multirtmp** opens the web interface.
+
+The same installer updates an existing installation, including v1.0.0 from
+another folder (it finds the old one through the registered service):
+
+- `config.json` is never part of the installer: it is never overwritten or
+  deleted. If `C:\multirtmp` has none yet, the one from the old folder is
+  copied over. The old folder itself is left as it is.
+- The service is stopped and removed, any running `mediamtx.exe` is closed
+  (one started by hand would take the preview's ports), the new files are
+  copied, the service is registered and started again.
+- A copy of the previous `multirtmp.exe` is kept in
+  `C:\multirtmp\backup\<version>\` for a manual rollback.
+- **If a stream is live**, the installer asks first: updating interrupts it
+  for 10-20 seconds (default answer: No).
+
+Silent update, e.g. remotely:
+
+```
+multirtmp-setup-1.2.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="C:\multirtmp-setup.log"
+```
+
+Exit codes: `0` — done; `10` — a stream is live, nothing was changed (run
+again later, or add `/FORCE` to update anyway); `11` — files were installed
+but the service did not register or start (see the log); `7` — the old
+service could not be stopped or the old config could not be copied (see
+the log); other non-zero codes are Inno Setup's own.
+
+Uninstalling (Windows "Installed apps") stops and removes the service, the
+desktop icon and the firewall rules, and deletes the program files.
+`config.json` and the logs stay in `C:\multirtmp`.
+
+**Windows SmartScreen.** The installer isn't code-signed, so if it was
+downloaded with a browser, Windows may show "Windows protected your PC"
+(More info → Run anyway). Copy it to the computer over the network share,
+RDP or USB instead, or run `Unblock-File .\multirtmp-setup-1.2.0.exe` in
+PowerShell before starting it — then the warning doesn't appear. Silent
+remote updates don't show it either.
+
+Building the installer (developers): `.\build-installer.ps1` — builds
+`multirtmp.exe`, takes `mediamtx.exe` and its `LICENSE` from `C:\mediamtx`
+(`-MediaMTXDir`), checks it is the MediaMTX version `mediamtx.yml` is made
+for, and writes `dist\multirtmp-setup-<version>.exe`. Needs Inno Setup 6.
+
+## Quick start (without the installer)
 
 1. `.\multirtmp.exe install` — registers the Windows service and puts a
    **multirtmp** icon on the desktop of every user of this computer

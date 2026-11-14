@@ -4,3 +4,4 @@ config.json
 config.local.json
 config.json.bak
 *.log
+/dist/

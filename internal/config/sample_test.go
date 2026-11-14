@@ -118,3 +118,17 @@ func TestWriteSampleStillValid(t *testing.T) {
 		t.Fatal("second WriteSample: expected an error")
 	}
 }
+
+// Хук для deploy\installer\test\test-installer-parse.ps1: если задана
+// MULTIRTMP_WRITE_INSTALL_CONFIG, пишет туда настоящий конфиг install —
+// на нём проверяется разбор конфига в коде установщика. Без переменной
+// ничего не делает.
+func TestWriteInstallConfigForInstallerTest(t *testing.T) {
+	path := os.Getenv("MULTIRTMP_WRITE_INSTALL_CONFIG")
+	if path == "" {
+		t.Skip("MULTIRTMP_WRITE_INSTALL_CONFIG not set")
+	}
+	if created, err := WriteInstallConfig(path); err != nil || !created {
+		t.Fatalf("WriteInstallConfig(%s) = %v, %v", path, created, err)
+	}
+}
