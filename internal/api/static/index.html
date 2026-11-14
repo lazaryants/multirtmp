@@ -514,8 +514,12 @@ window.addEventListener('unhandledrejection', function (e) {
   function hideAuthError() { document.getElementById('auth-error').style.display = 'none'; }
 
   function renderStatus(s) {
-    document.getElementById('build-info').textContent =
-      'v' + s.build.version + ' (' + s.build.commit + ')';
+    // build.version comes from `git describe` and already starts with "v"
+    // (e.g. v1.0.0-1-gfe1466e) — prefix one only if it's missing (a version
+    // passed to build.ps1 by hand without it, or the bare "dev" default).
+    var ver = s.build.version;
+    if (/^\d/.test(ver)) ver = 'v' + ver;
+    document.getElementById('build-info').textContent = ver + ' (' + s.build.commit + ')';
 
     var src = s.source;
     var srcOk = src.connected && src.watchdog_ok;
@@ -535,8 +539,15 @@ window.addEventListener('unhandledrejection', function (e) {
     }
     document.getElementById('source-detail').textContent = detail;
 
-    document.getElementById('buffer-text').textContent =
-      (s.buffer.bytes / 1048576).toFixed(1) + ' MB used · depth ' + s.buffer.depth_s.toFixed(1) + 's';
+    // Without a source the buffer still holds the tail of the last publish:
+    // it is cleared only on the next publish (delayed outputs keep playing
+    // that tail out after vMix stops). That's not "the stream is buffered",
+    // so show it the same way as the Source block — grey, not numbers.
+    var bufferTextEl = document.getElementById('buffer-text');
+    bufferTextEl.classList.toggle('waiting', !src.connected);
+    bufferTextEl.textContent = src.connected
+      ? (s.buffer.bytes / 1048576).toFixed(1) + ' MB used · depth ' + s.buffer.depth_s.toFixed(1) + 's'
+      : 'empty';
 
     renderOutputCards(s.outputs);
     renderNetwork(s.network);
