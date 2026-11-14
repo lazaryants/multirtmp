@@ -117,8 +117,8 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	if err != nil {
 		logger.Warn("main: could not detect LAN addresses for the tablet link, set api.public_host", "error", err)
 	}
-	for i, u := range lanURLs {
-		logger.Info("main: web UI reachable from the LAN", "url", u, "primary", i == 0)
+	for _, u := range lanURLs {
+		logger.Info("main: web UI reachable from the LAN", "url", u)
 	}
 
 	var firewallHint string

@@ -1086,23 +1086,20 @@ window.addEventListener('unhandledrejection', function (e) {
   });
 
   function renderTabletLinks(lanURLs) {
+    // Several links only when the server couldn't tell which network the
+    // tablet is on (no default gateway to go by) — so no "recommended" mark,
+    // just ask the operator to pick.
     document.getElementById('tablet-note').textContent = lanURLs.length > 1
-      ? 'This computer has several network addresses. The first one is most likely on the same network as the tablet; if it doesn\'t open, try the others.'
+      ? 'Could not tell which network the tablet is on. Use the address on the tablet\'s network; if a link doesn\'t open, try the next one. To show a single link, set api.public_host in config.json.'
       : '';
     var frag = document.createDocumentFragment();
-    lanURLs.forEach(function (u, i) {
+    lanURLs.forEach(function (u) {
       var row = document.createElement('div');
       row.className = 'link-row';
       var text = document.createElement('span');
       text.className = 'link-text';
       text.textContent = u;
       row.appendChild(text);
-      if (i === 0 && lanURLs.length > 1) {
-        var note = document.createElement('span');
-        note.className = 'link-note';
-        note.textContent = 'recommended';
-        row.appendChild(note);
-      }
       var copy = document.createElement('button');
       copy.className = 'btn';
       copy.textContent = 'Copy';

@@ -18,8 +18,9 @@ func ipnet(s string) net.IPNet {
 }
 
 // Раскладка машины из отчёта: VPN Karing (TUN, /30, без шлюза) и Ethernet с
-// тремя адресами, шлюз 192.168.1.1. Ethernet отдаёт адреса не в том
-// порядке, в каком хотелось бы, — 192.168.1.12 всё равно должен быть первым.
+// тремя адресами, шлюз 192.168.1.1. Дополнительные 192.168.10.12 и
+// 192.168.131.12 — статические, для настройки роутеров: раз есть адрес в
+// подсети шлюза, остаётся только он, хотя Ethernet отдаёт его последним.
 func TestRankLANIPsVPNMachine(t *testing.T) {
 	adapters := []adapterInfo{
 		{name: "Karing TUN Network Adapter", up: true, ifType: 53, addrs: []net.IPNet{ipnet("10.20.0.1/30")}},
@@ -30,9 +31,64 @@ func TestRankLANIPsVPNMachine(t *testing.T) {
 	}
 
 	got := rankLANIPs(adapters)
-	want := []string{"192.168.1.12", "192.168.131.12", "192.168.10.12"}
+	want := []string{"192.168.1.12"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// Два адаптера, у каждого свой шлюз (например, Ethernet и Wi-Fi в разных
+// сетях): оба адреса в подсети шлюза — показываются оба, а статический адрес
+// на Ethernet — нет.
+func TestRankLANIPsTwoGatewayNetworks(t *testing.T) {
+	adapters := []adapterInfo{
+		{name: "Ethernet", up: true, ifType: 6,
+			addrs:    []net.IPNet{ipnet("192.168.10.12/24"), ipnet("192.168.1.12/24")},
+			gateways: []net.IP{net.ParseIP("192.168.1.1")}},
+		{name: "Wi-Fi", up: true, ifType: 71,
+			addrs:    []net.IPNet{ipnet("10.0.5.40/24")},
+			gateways: []net.IP{net.ParseIP("10.0.5.1")}},
+	}
+
+	got := rankLANIPs(adapters)
+	want := []string{"192.168.1.12", "10.0.5.40"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// Полный список — только когда опереться не на что: шлюзов нет вовсе или
+// ни один адрес не попал в подсеть шлюза.
+func TestRankLANIPsFallbackFullList(t *testing.T) {
+	cases := []struct {
+		name     string
+		adapters []adapterInfo
+		want     []string
+	}{
+		{"no gateways at all", []adapterInfo{
+			{name: "Ethernet", up: true, ifType: 6, addrs: []net.IPNet{ipnet("192.168.131.12/24"), ipnet("192.168.1.12/24")}},
+			{name: "Wi-Fi", up: true, ifType: 71, addrs: []net.IPNet{ipnet("10.0.5.40/24")}},
+		}, []string{"192.168.131.12", "192.168.1.12", "10.0.5.40"}},
+		{"gateway outside every subnet", []adapterInfo{
+			{name: "Ethernet", up: true, ifType: 6,
+				addrs:    []net.IPNet{ipnet("192.168.131.12/24"), ipnet("192.168.1.12/24")},
+				gateways: []net.IP{net.ParseIP("172.20.0.1")}},
+		}, []string{"192.168.131.12", "192.168.1.12"}},
+		// Шлюз есть только у VPN, но сама VPN отсеяна по маске — он не
+		// должен ни выбрать VPN, ни "съесть" остальные адреса.
+		{"gateway only on a filtered VPN", []adapterInfo{
+			{name: "vpn", up: true, ifType: 53, addrs: []net.IPNet{ipnet("10.8.0.6/30")}, gateways: []net.IP{net.ParseIP("10.8.0.5")}},
+			{name: "Ethernet", up: true, ifType: 6, addrs: []net.IPNet{ipnet("192.168.1.12/24")}},
+		}, []string{"192.168.1.12"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rankLANIPs(tc.adapters)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

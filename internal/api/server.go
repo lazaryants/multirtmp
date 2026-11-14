@@ -29,7 +29,7 @@ type NetworkInfo struct {
 	// LANAccess — api.addr слушает не только loopback, то есть у кнопки "Show
 	// link for tablet" есть смысл. Не меняется без рестарта.
 	LANAccess bool
-	// LANURLs вычисляет ссылки на веб-интерфейс с токеном, лучшая первой (см.
+	// LANURLs вычисляет ссылки на веб-интерфейс с токеном (см.
 	// cmd/multirtmp/lanurl.go). Вызывается на каждый GET /network/lan-urls —
 	// то есть по клику "Show link for tablet", а не на каждый секундный
 	// /status: адрес машины на площадке меняется через DHCP, и ссылка,
