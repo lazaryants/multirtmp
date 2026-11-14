@@ -273,13 +273,19 @@
     padding: 14px 16px;
     margin-bottom: 16px;
   }
+  #tablet-panel .link-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0;
+  }
   #tablet-panel .link-text {
     font-family: ui-monospace, Consolas, monospace;
     font-size: 15px;
     word-break: break-all;
-    display: block;
-    margin: 8px 0;
+    flex: 1;
   }
+  #tablet-panel .link-note { color: var(--muted); font-size: 13px; }
 
   #auth-error {
     display: none;
@@ -321,8 +327,8 @@
 
 <div id="tablet-panel">
   <strong>Link for tablet access</strong>
-  <div class="link-text"></div>
-  <button class="btn" id="tablet-copy">Copy</button>
+  <div class="link-note" id="tablet-note"></div>
+  <div id="tablet-links"></div>
 </div>
 
 <section>
@@ -587,7 +593,6 @@ window.addEventListener('unhandledrejection', function (e) {
     });
   }
 
-  var lanURL = '';
 
   function renderNetwork(net) {
     var fw = document.getElementById('firewall-banner');
@@ -598,10 +603,9 @@ window.addEventListener('unhandledrejection', function (e) {
       fw.style.display = 'none';
     }
 
-    lanURL = net.lan_url || '';
     var btn = document.getElementById('tablet-btn');
-    btn.disabled = !lanURL;
-    btn.title = lanURL ? '' : 'api.addr is localhost-only — set it to a LAN address to enable this';
+    btn.disabled = !net.lan_access;
+    btn.title = net.lan_access ? '' : 'api.addr is localhost-only — set it to a LAN address to enable this';
   }
 
   // preview.{enabled,url} come from config.json and don't change without a
@@ -1044,20 +1048,77 @@ window.addEventListener('unhandledrejection', function (e) {
 
   // ---- tablet link panel ---------------------------------------------
 
-  document.getElementById('tablet-btn').addEventListener('click', function () {
+  // Links are fetched fresh every time the panel is opened (the server
+  // re-reads the network adapters for this request) — the machine's address
+  // can change via DHCP, and a stale link is worse than none. Not part of the
+  // 1s /status poll, so the adapters aren't enumerated every second.
+  document.getElementById('tablet-btn').addEventListener('click', async function () {
     var panel = document.getElementById('tablet-panel');
-    if (!lanURL) return;
-    panel.querySelector('.link-text').textContent = lanURL;
-    panel.style.display = panel.style.display === 'none' || !panel.style.display ? 'block' : 'none';
+    if (panel.style.display === 'block') {
+      panel.style.display = 'none';
+      return;
+    }
+
+    var btn = this;
+    btn.disabled = true;
+    var urls = null, failure = '';
+    try {
+      var res = await fetchWithTimeout('/network/lan-urls');
+      if (res.status === 401) { showAuthError(); return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      urls = (await res.json()).urls || [];
+    } catch (e) {
+      failure = e && e.name === 'AbortError' ? 'timed out after 15s' : String(e && e.message || e);
+    } finally {
+      btn.disabled = false;
+    }
+
+    // Rendering is outside the try on purpose (same as fetchStatus): a bug
+    // in it must surface through the global error banner, not be reported
+    // as a network failure.
+    if (failure) {
+      document.getElementById('tablet-note').textContent = 'Could not get the links: ' + failure;
+      document.getElementById('tablet-links').replaceChildren();
+    } else {
+      renderTabletLinks(urls);
+    }
+    panel.style.display = 'block';
   });
 
-  document.getElementById('tablet-copy').addEventListener('click', async function () {
-    if (!lanURL) return;
+  function renderTabletLinks(lanURLs) {
+    document.getElementById('tablet-note').textContent = lanURLs.length > 1
+      ? 'This computer has several network addresses. The first one is most likely on the same network as the tablet; if it doesn\'t open, try the others.'
+      : '';
+    var frag = document.createDocumentFragment();
+    lanURLs.forEach(function (u, i) {
+      var row = document.createElement('div');
+      row.className = 'link-row';
+      var text = document.createElement('span');
+      text.className = 'link-text';
+      text.textContent = u;
+      row.appendChild(text);
+      if (i === 0 && lanURLs.length > 1) {
+        var note = document.createElement('span');
+        note.className = 'link-note';
+        note.textContent = 'recommended';
+        row.appendChild(note);
+      }
+      var copy = document.createElement('button');
+      copy.className = 'btn';
+      copy.textContent = 'Copy';
+      copy.addEventListener('click', function () { copyText(u); });
+      row.appendChild(copy);
+      frag.appendChild(row);
+    });
+    document.getElementById('tablet-links').replaceChildren(frag);
+  }
+
+  async function copyText(text) {
     try {
-      await navigator.clipboard.writeText(lanURL);
+      await navigator.clipboard.writeText(text);
     } catch (e) {
       var ta = document.createElement('textarea');
-      ta.value = lanURL;
+      ta.value = text;
       ta.style.position = 'fixed';
       ta.style.opacity = '0';
       document.body.appendChild(ta);
@@ -1065,7 +1126,7 @@ window.addEventListener('unhandledrejection', function (e) {
       try { document.execCommand('copy'); } catch (e2) {}
       document.body.removeChild(ta);
     }
-  });
+  }
 
   // ---- boot ------------------------------------------------------------
 

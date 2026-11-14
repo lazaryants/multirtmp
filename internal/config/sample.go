@@ -34,9 +34,15 @@ const sampleConfig = `{
   // — "token" then becomes required (refuses to start otherwise) and must be
   // sent as "Authorization: Bearer <token>" or "?token=<token>". A random
   // token is already filled in below so it's ready whenever you need it.
+  // Requests from this computer itself never need the token.
+  // "public_host" (optional): the name or IP other devices use to reach this
+  // computer, e.g. "192.168.1.12" or "studio-pc" — no http://, no port. If
+  // set, "Show link for tablet" uses only it; if empty, the links are built
+  // from this computer's network adapters (VPN tunnels are skipped).
   "api": {
     "addr": "127.0.0.1:8080",
-    "token": "__TOKEN__"
+    "token": "__TOKEN__",
+    "public_host": ""
   },
 
   // Log level for the file (next to the exe, rotated 10MB x5) and stdout

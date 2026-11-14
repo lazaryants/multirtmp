@@ -188,3 +188,18 @@ func TestDocPreservesSectionWithNoOutputsChange(t *testing.T) {
 	}
 	assertSectionEqual(t, got, "notify", `{"telegram_bot_token": "", "telegram_chat_id": ""}`)
 }
+
+func TestValidatePublicHost(t *testing.T) {
+	ok := []string{"192.168.1.12", "studio-pc", "studio-pc.local", "fd00::5", "[fd00::5]"}
+	for _, h := range ok {
+		if err := validatePublicHost(h); err != nil {
+			t.Errorf("%q: unexpected error %v", h, err)
+		}
+	}
+	bad := []string{"http://192.168.1.12", "192.168.1.12:8080", "studio-pc/", "a b", "[fd00::5]:8080"}
+	for _, h := range bad {
+		if err := validatePublicHost(h); err == nil {
+			t.Errorf("%q: expected an error", h)
+		}
+	}
+}

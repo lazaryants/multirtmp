@@ -113,9 +113,12 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 		logger.Warn("main: failed to back up config.json", "error", err)
 	}
 
-	lanURL := detectLANURL(cfg.APIAddr, cfg.APIToken)
-	if lanURL != "" {
-		logger.Info("main: web UI reachable from the LAN", "url", lanURL)
+	lanURLs, err := detectLANURLs(cfg.APIAddr, cfg.APIToken, cfg.APIPublicHost)
+	if err != nil {
+		logger.Warn("main: could not detect LAN addresses for the tablet link, set api.public_host", "error", err)
+	}
+	for i, u := range lanURLs {
+		logger.Info("main: web UI reachable from the LAN", "url", u, "primary", i == 0)
 	}
 
 	var firewallHint string
@@ -137,7 +140,18 @@ func runApp(ctx context.Context, logger *slog.Logger, levelVar *slog.LevelVar, o
 	// имеет о -out. При активном -out буфер-автоподбор и GET /outputs будут
 	// смотреть на реальный файл, а не на то, что подменил -out — известный,
 	// осознанно принятый нюанс debug-режима, не для продакшна.
-	apiSrv, err := api.NewServer(cfg.APIAddr, cfg.APIToken, api.NetworkInfo{LANURL: lanURL, FirewallHint: firewallHint},
+	//
+	// Ссылки для планшета в интерфейсе вычисляются заново на каждый клик
+	// "Show link for tablet" (адрес машины меняется через DHCP); строка в
+	// логе выше — снимок на момент старта.
+	network := api.NetworkInfo{
+		LANAccess: !config.IsLoopbackAddr(cfg.APIAddr),
+		LANURLs: func() ([]string, error) {
+			return detectLANURLs(cfg.APIAddr, cfg.APIToken, cfg.APIPublicHost)
+		},
+		FirewallHint: firewallHint,
+	}
+	apiSrv, err := api.NewServer(cfg.APIAddr, cfg.APIToken, network,
 		api.PreviewInfo{Enabled: cfg.PreviewEnabled, URL: cfg.PreviewURL},
 		logger, ingestSrv, buf, registry, opts.cfgPath, notifier)
 	if err != nil {

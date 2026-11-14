@@ -3,63 +3,83 @@ package main
 import (
 	"fmt"
 	"net"
+	"net/url"
+	"strings"
 
 	"multirtmp/internal/config"
 )
 
-// detectLANURL строит ссылку на веб-интерфейс для устройств в локальной
-// сети (планшет и т.п.) — используется и в стартовом логе, и в поле
-// network.lan_url для кнопки "Show link for tablet" в интерфейсе. Пусто, если
-// api.addr — loopback (LAN-доступа нет вообще, ссылка была бы бесполезна).
-func detectLANURL(apiAddr, token string) string {
+// lanHostPlaceholder — подставляется вместо адреса, если ни одного
+// подходящего не нашлось: оператор видит формат ссылки и заменит адрес сам
+// (или задаст api.public_host).
+const lanHostPlaceholder = "<this-machine-LAN-IP>"
+
+// detectLANURLs — ссылки на веб-интерфейс для устройств в локальной сети
+// (планшет и т.п.), лучшая первой. Используются и в стартовом логе, и в поле
+// network.lan_urls для кнопки "Show link for tablet". Пусто, если api.addr —
+// loopback (LAN-доступа нет вообще).
+func detectLANURLs(apiAddr, token, publicHost string) ([]string, error) {
+	return buildLANURLs(apiAddr, token, publicHost, func() ([]string, error) {
+		adapters, err := readAdapters()
+		if err != nil {
+			return nil, err
+		}
+		return rankLANIPs(adapters), nil
+	})
+}
+
+// buildLANURLs — логика detectLANURLs без обращения к реальным адаптерам
+// (candidates подставляется в тестах):
+//
+//   - api.addr loopback — ссылок нет;
+//   - задан api.public_host — ровно одна ссылка с ним, без угадывания;
+//   - api.addr привязан к конкретному адресу — ровно одна ссылка на него
+//     (сервер слушает только его, другие адреса бесполезны);
+//   - api.addr слушает все интерфейсы — по ссылке на каждый адрес из
+//     candidates (уже отсортированы, лучший первым); если их нет —
+//     одна ссылка с заглушкой вместо адреса.
+//
+// Ошибка возвращается только из candidates — при этом ссылка с заглушкой
+// всё равно отдаётся, чтобы кнопка в интерфейсе не пропадала.
+func buildLANURLs(apiAddr, token, publicHost string, candidates func() ([]string, error)) ([]string, error) {
 	if config.IsLoopbackAddr(apiAddr) {
-		return ""
+		return nil, nil
 	}
 
 	host, port, err := net.SplitHostPort(apiAddr)
 	if err != nil {
-		return ""
+		return nil, nil
 	}
 
-	displayHost := host
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		if ip := firstLANIPv4(); ip != "" {
-			displayHost = ip
-		} else {
-			displayHost = "<this-machine-LAN-IP>"
+	mk := func(h string) string {
+		u := "http://" + net.JoinHostPort(h, port) + "/"
+		if token != "" {
+			u += "?token=" + url.QueryEscape(token)
 		}
+		return u
 	}
 
-	url := fmt.Sprintf("http://%s:%s/", displayHost, port)
-	if token != "" {
-		url += "?token=" + token
+	if publicHost != "" {
+		return []string{mk(strings.TrimSuffix(strings.TrimPrefix(publicHost, "["), "]"))}, nil
 	}
 
-	return url
-}
+	if ip := net.ParseIP(host); host != "" && (ip == nil || !ip.IsUnspecified()) {
+		return []string{mk(host)}, nil
+	}
 
-// firstLANIPv4 — первый найденный "обычный" IPv4-адрес машины (не loopback,
-// не link-local 169.254.x.x) — лучшее, что можно сделать без явного указания
-// интерфейса оператором. Если интерфейсов несколько (VPN, виртуалки), может
-// угадать не тот — тогда оператор просто заменит IP в напечатанной ссылке на
-// правильный, значение всё равно лучше, чем пусто.
-func firstLANIPv4() string {
-	addrs, err := net.InterfaceAddrs()
+	ips, err := candidates()
 	if err != nil {
-		return ""
+		return []string{mk(lanHostPlaceholder)}, fmt.Errorf("failed to list network adapters: %w", err)
+	}
+	if len(ips) == 0 {
+		return []string{mk(lanHostPlaceholder)}, nil
 	}
 
-	for _, a := range addrs {
-		ipnet, ok := a.(*net.IPNet)
-		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.IsLinkLocalUnicast() {
-			continue
-		}
-		if ip4 := ipnet.IP.To4(); ip4 != nil {
-			return ip4.String()
-		}
+	urls := make([]string, len(ips))
+	for i, ip := range ips {
+		urls[i] = mk(ip)
 	}
-
-	return ""
+	return urls, nil
 }
 
 // portOf возвращает порт из host:port, пустую строку при ошибке разбора

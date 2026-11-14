@@ -67,6 +67,10 @@ type BufferConfig struct {
 type APIConfig struct {
 	Addr  string `json:"addr"`
 	Token string `json:"token"` // обязателен, если addr не loopback (см. IsLoopbackAddr)
+	// PublicHost — необязательный адрес (имя или IP, без порта), под которым
+	// эту машину видят устройства в LAN. Если задан, ссылка для планшета
+	// строится только с ним, без угадывания по адаптерам.
+	PublicHost string `json:"public_host"`
 }
 
 // PreviewConfig — необязательный оперативный превью-плеер в интерфейсе, под
@@ -109,6 +113,9 @@ type Resolved struct {
 	// Не-loopback addr без токена — ошибка валидации, не тихий проброс наружу
 	// без защиты.
 	APIToken string
+	// APIPublicHost — api.public_host как есть; пусто — адрес для ссылки на
+	// планшет подбирается по сетевым адаптерам.
+	APIPublicHost string
 
 	LogLevel slog.Level
 	Notify   notify.Config // нулевое значение = notify выключен
@@ -267,6 +274,12 @@ func resolve(cfg *Config) (*Resolved, error) {
 		addf("api.token: required when api.addr is not localhost (%q) — anyone on the network could reach the API otherwise", res.APIAddr)
 	}
 	res.APIToken = cfg.API.Token
+	if h := cfg.API.PublicHost; h != "" {
+		if err := validatePublicHost(h); err != nil {
+			addf("api.public_host: %s", err)
+		}
+		res.APIPublicHost = h
+	}
 
 	// log.level
 	if cfg.Log.Level == "" {
@@ -356,6 +369,22 @@ func resolve(cfg *Config) (*Resolved, error) {
 	}
 
 	return res, nil
+}
+
+// validatePublicHost — api.public_host: имя или IP без схемы, пути и порта
+// (порт всегда берётся из api.addr). IPv6 — как есть или в квадратных
+// скобках.
+func validatePublicHost(h string) error {
+	if strings.Contains(h, "://") {
+		return fmt.Errorf("%q: host only, without http:// (e.g. \"192.168.1.12\" or \"studio-pc\")", h)
+	}
+	if strings.ContainsAny(h, "/?#@ \t") {
+		return fmt.Errorf("%q: host only (a name or an IP), no path or spaces", h)
+	}
+	if _, _, err := net.SplitHostPort(h); err == nil {
+		return fmt.Errorf("%q: without a port — the port is taken from api.addr", h)
+	}
+	return nil
 }
 
 // IsLoopbackAddr сообщает, слушает ли addr (host:port) только локальную

@@ -50,6 +50,14 @@ token included, is printed to the log at startup — copy it to the other
 device, or use the "Show link for tablet" button in the interface on the
 server itself.
 
+If the computer has several network addresses, there is one link per
+address, and the first one is on the same network as the default gateway.
+VPN tunnel adapters are left out. If the links are still wrong (or you want
+the tablet to use the computer's name), set `api.public_host` in
+`config.json` to the name or IP the tablet should use, e.g. `"studio-pc"`
+or `"192.168.1.12"` (no `http://`, no port). Then only that one link is
+shown.
+
 Requests that arrive from this computer itself skip the token. Don't
 forward the web interface port from this computer with a local proxy or
 port-forwarding tool (`netsh interface portproxy`, ngrok and the like):

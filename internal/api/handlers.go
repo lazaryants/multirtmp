@@ -18,7 +18,7 @@ type statusResponse struct {
 }
 
 type networkJSON struct {
-	LANURL       string `json:"lan_url,omitempty"`
+	LANAccess    bool   `json:"lan_access"`
 	FirewallHint string `json:"firewall_hint,omitempty"`
 }
 
@@ -75,7 +75,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	resp := statusResponse{
 		Build:   buildJSON{Version: buildinfo.Version, Commit: buildinfo.Commit},
-		Network: networkJSON{LANURL: s.network.LANURL, FirewallHint: s.network.FirewallHint},
+		Network: networkJSON{LANAccess: s.network.LANAccess, FirewallHint: s.network.FirewallHint},
 		Preview: previewJSON{Enabled: s.preview.Enabled, URL: s.preview.URL},
 		Source:  sj,
 		Buffer: bufferStatusJSON{
@@ -125,4 +125,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{"ok": false, "error": err.Error()})
+}
+
+// handleLANURLs — ссылки для планшета, вычисленные в момент запроса (см.
+// NetworkInfo.LANURLs). Пустой список — api.addr loopback, LAN-доступа нет.
+func (s *Server) handleLANURLs(w http.ResponseWriter, r *http.Request) {
+	var urls []string
+	if s.network.LANURLs != nil {
+		var err error
+		urls, err = s.network.LANURLs()
+		if err != nil {
+			s.logger.Warn("api: could not detect LAN addresses for the tablet link, set api.public_host", "error", err)
+		}
+	}
+	if urls == nil {
+		urls = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"urls": urls})
 }

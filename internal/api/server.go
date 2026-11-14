@@ -26,11 +26,19 @@ import (
 // старте). Пустые поля означают "не применимо" (loopback-режим) — фронтенд
 // прячет соответствующие элементы интерфейса.
 type NetworkInfo struct {
-	// LANURL — полная ссылка на веб-интерфейс с токеном (для кнопки "Show
-	// link for tablet"). Отдаётся только клиенту, прошедшему requireToken:
-	// либо он уже знает этот токен, либо это локальный запрос с самой этой
-	// машины, где токен и так лежит в config.json — не новая утечка.
-	LANURL string
+	// LANAccess — api.addr слушает не только loopback, то есть у кнопки "Show
+	// link for tablet" есть смысл. Не меняется без рестарта.
+	LANAccess bool
+	// LANURLs вычисляет ссылки на веб-интерфейс с токеном, лучшая первой (см.
+	// cmd/multirtmp/lanurl.go). Вызывается на каждый GET /network/lan-urls —
+	// то есть по клику "Show link for tablet", а не на каждый секундный
+	// /status: адрес машины на площадке меняется через DHCP, и ссылка,
+	// вычисленная при старте, устаревает. Ошибка не мешает отдать то, что
+	// вычислилось (ссылку с заглушкой вместо адреса). Ссылки отдаются только
+	// клиенту, прошедшему requireToken: либо он уже знает этот токен, либо это
+	// локальный запрос с самой этой машины, где токен и так лежит в
+	// config.json — не новая утечка.
+	LANURLs func() ([]string, error)
 	// FirewallHint — готовая PowerShell-команда, если правило Windows
 	// Firewall для текущего порта не найдено. Пусто — либо loopback, либо
 	// правило на месте.
@@ -88,6 +96,7 @@ func NewServer(addr, token string, network NetworkInfo, preview PreviewInfo, log
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", s.handleStatus)
+	mux.HandleFunc("GET /network/lan-urls", s.handleLANURLs)
 	mux.HandleFunc("POST /outputs/{name}/start", s.handleOutputStart)
 	mux.HandleFunc("POST /outputs/{name}/stop", s.handleOutputStop)
 	mux.HandleFunc("GET /outputs", s.handleOutputsList)
