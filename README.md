@@ -7,11 +7,14 @@ independently configurable delay — e.g. a corporate feed at 0s, YouTube at
 
 ## Quick start
 
-1. `.\multirtmp.exe install` — registers the Windows service (one-time).
+1. `.\multirtmp.exe install` — registers the Windows service and puts a
+   **multirtmp** icon on the desktop of every user of this computer
+   (one-time, as administrator).
 2. Edit `config.json` (created next to the exe the first time it runs) —
    set your destinations and delays.
 3. `.\multirtmp.exe start` — starts it.
-4. Open `http://127.0.0.1:8080/` — live status and destination management.
+4. Double-click the **multirtmp** icon on the desktop — it opens live status
+   and destination management in its own window.
 
 Steps 1-2 are one-time setup, done once when deploying to a machine. After
 `install`, the service is registered to start automatically on Windows boot —
@@ -27,19 +30,30 @@ instead.
 
 - `multirtmp.exe status` — is it running?
 - `multirtmp.exe stop` — stop it.
-- `multirtmp.exe uninstall` — remove the service entirely.
+- `multirtmp.exe uninstall` — remove the service and the desktop icon.
+- `multirtmp.exe open` — open the web interface (this is what the desktop
+  icon runs).
 
 ## Web interface
 
-`http://127.0.0.1:8080/` by default — local-only, no login required.
+The desktop icon opens it in Microsoft Edge as a separate app window (or in
+the default browser if Edge isn't installed). If the service isn't running,
+the icon shows a message saying so and how to start it, instead of a browser
+error page. The address is `http://127.0.0.1:8080/` by default — on this
+computer itself no token is ever needed.
 
 To reach it from another device on the same network (e.g. a tablet next to
 the scoreboard), set `api.addr` in `config.json` to this machine's LAN
-address or `0.0.0.0:8080`; a token then becomes required (the app refuses to
-start without one) and a ready-to-use link, with the token included, is
-printed to the log at startup — copy it to the other device, or use the
-"Show link for tablet" button in the interface once you're logged in from the
+address or `0.0.0.0:8080`; a token then becomes required for other devices
+(the app refuses to start without one) and a ready-to-use link, with the
+token included, is printed to the log at startup — copy it to the other
+device, or use the "Show link for tablet" button in the interface on the
 server itself.
+
+Requests that arrive from this computer itself skip the token. Don't
+forward the web interface port from this computer with a local proxy or
+port-forwarding tool (`netsh interface portproxy`, ngrok and the like):
+requests through it would also look local and skip the token.
 
 ## Configuration
 

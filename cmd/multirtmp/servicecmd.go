@@ -27,7 +27,7 @@ const (
 	serviceDescription = "Relays an RTMP publish (vMix) to multiple RTMP destinations, each with its own delay."
 )
 
-// runServiceSubcommand обрабатывает install/uninstall/start/stop/status,
+// runServiceSubcommand обрабатывает install/uninstall/start/stop/status/open,
 // если os.Args[1] — одна из них. Возвращает true, если подкоманда
 // распознана и обработана (вызывающий должен просто завершиться).
 func runServiceSubcommand() bool {
@@ -46,6 +46,8 @@ func runServiceSubcommand() bool {
 		cmdStop()
 	case "status":
 		cmdStatus()
+	case "open":
+		cmdOpen(os.Args[2:])
 	default:
 		return false
 	}
@@ -91,6 +93,8 @@ func cmdInstall(args []string) {
 			}
 		}
 	}
+
+	addDesktopShortcut(exePath, *cfgPath)
 }
 
 func cmdUninstall() {
@@ -103,6 +107,10 @@ func cmdUninstall() {
 
 	if err := winservice.RemoveFirewallRule(); err != nil {
 		fmt.Fprintln(os.Stderr, "multirtmp uninstall: warning: failed to remove firewall rule:", err)
+	}
+
+	if err := winservice.RemoveDesktopShortcut(); err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp uninstall: warning:", err)
 	}
 }
 
@@ -177,4 +185,27 @@ func cmdStatus() {
 	}
 
 	fmt.Println(st)
+}
+
+// addDesktopShortcut — best-effort, как и правило firewall: служба уже
+// установлена, отсутствие ярлыка — не повод считать install неудачным.
+// Ярлык запускает `multirtmp.exe open`; если install вызван с -config, тот же
+// путь (абсолютный — у ярлыка своя рабочая папка) передаётся и в open.
+func addDesktopShortcut(exePath, cfgPath string) {
+	args := []string{"open"}
+	if cfgPath != "" {
+		abs, err := filepath.Abs(cfgPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "multirtmp install: warning: desktop shortcut not created: failed to resolve config path:", err)
+			return
+		}
+		args = append(args, "-config", abs)
+	}
+
+	lnk, err := winservice.CreateDesktopShortcut(exePath, args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "multirtmp install: warning:", err)
+		return
+	}
+	fmt.Println("desktop shortcut created:", lnk)
 }

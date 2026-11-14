@@ -1,9 +1,11 @@
 package winservice
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -192,4 +194,41 @@ func stateString(st svc.State) string {
 	default:
 		return fmt.Sprintf("unknown(%d)", st)
 	}
+}
+
+// QueryStatusReadOnly — то же, что QueryStatus, но с минимальными правами
+// (SC_MANAGER_CONNECT + SERVICE_QUERY_STATUS): работает под обычным
+// пользователем без прав администратора. QueryStatus идёт через
+// mgr.Connect()/OpenService, которые запрашивают полный доступ к SCM и
+// службе, — у оператора без админ-прав это "Access is denied". Нужна
+// подкоманде open, которую запускают ярлыком с рабочего стола.
+//
+// installed == false (без ошибки), если службы с таким именем нет.
+func QueryStatusReadOnly(name string) (state string, installed bool, err error) {
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return "", false, fmt.Errorf("winservice: failed to connect to SCM: %w", err)
+	}
+	defer windows.CloseServiceHandle(scm)
+
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return "", false, fmt.Errorf("winservice: invalid service name %q: %w", name, err)
+	}
+
+	h, err := windows.OpenService(scm, namePtr, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("winservice: failed to open service %q: %w", name, err)
+	}
+	defer windows.CloseServiceHandle(h)
+
+	var st windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(h, &st); err != nil {
+		return "", true, fmt.Errorf("winservice: failed to query status: %w", err)
+	}
+
+	return stateString(svc.State(st.CurrentState)), true, nil
 }

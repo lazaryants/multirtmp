@@ -1,6 +1,6 @@
-// Package api — HTTP API + веб-интерфейс статуса и управления выходами. На
-// 127.0.0.1 работает без аутентификации, как и раньше; при не-loopback
-// api.addr (доступ с планшета по LAN) требует токен — см. NewServer.
+// Package api — HTTP API + веб-интерфейс статуса и управления выходами.
+// Запросы с самой этой машины (loopback) работают без токена; с других машин
+// (api.addr слушает LAN, доступ с планшета) нужен токен — см. requireToken.
 package api
 
 import (
@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -25,8 +27,9 @@ import (
 // прячет соответствующие элементы интерфейса.
 type NetworkInfo struct {
 	// LANURL — полная ссылка на веб-интерфейс с токеном (для кнопки "Show
-	// link for tablet"). Отдаётся только уже аутентифицированному клиенту —
-	// это тот же токен, что клиент и так знает, не новая утечка.
+	// link for tablet"). Отдаётся только клиенту, прошедшему requireToken:
+	// либо он уже знает этот токен, либо это локальный запрос с самой этой
+	// машины, где токен и так лежит в config.json — не новая утечка.
 	LANURL string
 	// FirewallHint — готовая PowerShell-команда, если правило Windows
 	// Firewall для текущего порта не найдено. Пусто — либо loopback, либо
@@ -59,8 +62,8 @@ type Server struct {
 }
 
 // NewServer создаёт API-сервер, слушающий addr (например, "127.0.0.1:8080").
-// token — из config.Resolved.APIToken; пусто на loopback-адресах (тогда
-// аутентификация выключена целиком, поведение как раньше). cfgPath —
+// token — из config.Resolved.APIToken; может быть пустым на loopback-адресах
+// (тогда пускаются только локальные запросы — см. requireToken). cfgPath —
 // config.json для персиста правок из раздела Destinations (см.
 // outputs_store.go) — каждая мутация перечитывает его заново с диска, ничего
 // не кешируется между запросами; notifier — для алертов down/up у выходов,
@@ -107,37 +110,133 @@ func (s *Server) MaxOutputDelay() time.Duration {
 	return s.outputs.MaxOutputDelay()
 }
 
-// requireToken — единственная точка проверки аутентификации, оборачивает
-// весь mux целиком (включая GET / — токен из query должен пускать и первую
-// загрузку страницы). Если token пуст (loopback-режим), пропускает всё без
-// проверки — поведение stage 5 не меняется. Токен ищется в заголовке
-// Authorization: Bearer <token> (все запросы фронтенда после первой
-// загрузки) и в ?token=<token> (первая загрузка страницы по ссылке).
+// requireToken — единственная точка проверки доступа, оборачивает весь mux
+// целиком (включая GET / — токен из query должен пускать и первую загрузку
+// страницы). Порядок:
+//
+//  1. Верный токен (если он вообще задан в конфиге) — пропустить, без
+//     проверки Host/Origin/адреса клиента: чужой сайт токена не знает, а
+//     планшет может обращаться по имени компьютера или по IP, сменившемуся
+//     через DHCP.
+//  2. Иначе запрос с loopback-адреса (сама эта машина: ярлык на рабочем
+//     столе, браузер на сервере) — пропустить без токена, но только если
+//     Host — loopback-имя (защита от DNS rebinding) и, для изменяющих
+//     методов, Origin отсутствует или совпадает с Host (защита от CSRF).
+//  3. Иначе — 401.
+//
+// Токен ищется в заголовке Authorization: Bearer <token> (все запросы
+// фронтенда после первой загрузки) и в ?token=<token> (первая загрузка
+// страницы по ссылке).
 //
 // Ни здесь, ни где-либо ещё в этом пакете НЕ логируется r.URL.String()/
-// RawQuery целиком — там может быть токен. Единственная строка про неудачную
-// попытку логирует только r.URL.Path.
+// RawQuery или заголовки целиком — там может быть токен. Строки про отказ
+// логируют только r.URL.Path и причину.
 func (s *Server) requireToken(next http.Handler) http.Handler {
-	if s.token == "" {
-		return next
-	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := r.URL.Query().Get("token")
-		if tok == "" {
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				tok = strings.TrimPrefix(auth, "Bearer ")
-			}
+		if s.validToken(r) {
+			next.ServeHTTP(w, r)
+			return
 		}
 
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+		if !isLoopbackRemote(r.RemoteAddr) {
 			s.logger.Warn("api: rejected request with missing/invalid token", "path", r.URL.Path)
 			writeError(w, http.StatusUnauthorized, errors.New("unauthorized: missing or invalid token"))
 			return
 		}
 
+		if reason := loopbackRequestProblem(r); reason != "" {
+			s.logger.Warn("api: rejected local request", "path", r.URL.Path, "reason", reason)
+			writeError(w, http.StatusForbidden, errors.New("forbidden: "+reason))
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
+}
+
+// validToken — true, только если токен в конфиге задан И запрос несёт
+// ровно его. Проверка s.token != "" обязательна: ConstantTimeCompare двух
+// пустых строк возвращает 1, и без неё в loopback-режиме (токена нет) любой
+// запрос без токена считался бы "с верным токеном" и обходил проверки
+// Host/Origin.
+func (s *Server) validToken(r *http.Request) bool {
+	if s.token == "" {
+		return false
+	}
+
+	tok := r.URL.Query().Get("token")
+	if tok == "" {
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			tok = strings.TrimPrefix(auth, "Bearer ")
+		}
+	}
+
+	return subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
+}
+
+// isLoopbackRemote — пришло ли TCP-соединение с самой этой машины. Решение
+// принимается только по фактическому адресу сокета, заголовки
+// (X-Forwarded-For и т.п.) не учитываются вообще — их подделывает кто угодно.
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// loopbackRequestProblem — почему запрос с loopback-адреса без токена
+// нельзя пропустить; пустая строка — можно.
+//
+// Host: браузер на этой машине, открывший страницу чужого сайта, может через
+// DNS rebinding (домен злоумышленника временно резолвится в 127.0.0.1)
+// отправлять запросы как будто с того же origin и читать ответы — включая
+// ключи потоков из GET /outputs. В таком запросе Host — домен
+// злоумышленника, поэтому допускаем только loopback-имена.
+//
+// Origin: обработчики разбирают JSON независимо от Content-Type, так что
+// чужой сайт может послать POST с text/plain без CORS-preflight (CSRF) —
+// например, добавить выход на свой RTMP-сервер. Браузер всегда ставит Origin
+// на кросс-доменные POST/PUT/DELETE; отсутствие Origin — не браузерный
+// клиент (curl, сама подкоманда open) или запрос того же origin.
+func loopbackRequestProblem(r *http.Request) string {
+	if !isLoopbackHostName(hostWithoutPort(r.Host)) {
+		return "unexpected Host header for a local request"
+	}
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return ""
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" || !strings.EqualFold(u.Host, r.Host) {
+		return "cross-origin request"
+	}
+
+	return ""
+}
+
+// hostWithoutPort — имя из заголовка Host без порта и без квадратных скобок
+// IPv6 ("[::1]:8080" -> "::1", "localhost" -> "localhost").
+func hostWithoutPort(hostHeader string) string {
+	if h, _, err := net.SplitHostPort(hostHeader); err == nil {
+		return h
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(hostHeader, "["), "]")
+}
+
+func isLoopbackHostName(h string) bool {
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ListenAndServe блокируется, пока не будет вызван Close. При штатной

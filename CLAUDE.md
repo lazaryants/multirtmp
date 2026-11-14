@@ -178,7 +178,7 @@ Backoff: 0 → 0.5 → 1 → 2 → 5 с, дальше 5 с бесконечно.
 
 Структура
 
-cmd/multirtmp/       main, флаги, команды службы (install/start/stop/status/uninstall), автоподбор буфера, LAN-ссылка
+cmd/multirtmp/       main, флаги, команды службы (install/start/stop/status/uninstall), open (ярлык -> окно интерфейса), автоподбор буфера, LAN-ссылка
 
 internal/ingest/     RTMP-сервер, парсинг тегов, watchdog источника
 
@@ -192,7 +192,7 @@ internal/api/        HTTP API, токен для LAN-доступа, embed ве�
 
 internal/notify/     алерты (Telegram)
 
-internal/winservice/ Windows-служба (SCM, recovery), правило Windows Firewall
+internal/winservice/ Windows-служба (SCM, recovery), правило Windows Firewall, ярлык на общем рабочем столе
 
 internal/logrotate/  ротирующий лог-файл
 
@@ -291,4 +291,6 @@ gofmt обязателен. go vet перед каждым коммитом.
 Не делаем аутентификацию на ingest — слушаем только 127.0.0.1.
 
 API по умолчанию — только 127.0.0.1, без токена. Доступ по LAN (с планшета) — только по явной настройке api.addr на не-loopback адрес, и тогда api.token обязателен: без него программа отказывается стартовать. Наружу в интернет API не открываем.
+
+Запросы с loopback-адреса (сама эта машина: ярлык на рабочем столе, браузер на сервере) токен не требуют никогда, даже если api.addr слушает LAN. Взамен такие запросы проходят проверку Host (только loopback-имя — защита от DNS rebinding) и, для POST/PUT/DELETE, Origin (отсутствует или совпадает с Host — защита от CSRF). Запрос с верным токеном пропускается при любом Host/Origin: планшет может обращаться по имени компьютера или по IP, сменившемуся через DHCP.
 
